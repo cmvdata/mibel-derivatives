@@ -17,6 +17,10 @@ dependencies = [
     "statsmodels>=0.14",
     "matplotlib>=3.8",
     "python-dotenv>=1.0",
+    "requests>=2.31",
+    "beautifulsoup4>=4.12",
+    "lxml>=5.0",
+    "holidays>=0.50",
 ]
 
 [project.optional-dependencies]
@@ -56,4 +60,5 @@ addopts = "-ra --strict-markers"
 markers = [
     "slow: tests that take more than a few seconds",
     "monte_carlo: tests that run Monte Carlo simulation (potentially slow)",
+    "network: tests that hit the public internet (excluded from CI fast path)",
 ]

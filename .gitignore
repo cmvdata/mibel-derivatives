@@ -33,11 +33,11 @@ notebooks/*.executed.ipynb
 .env
 .env.local
 
-# Data (never commit raw or processed; only schemas and READMEs)
+# Data lakehouse (never commit downloaded artifacts; only schemas and READMEs)
 data/raw/
-data/processed/
-data/external/
-data/cache/
+data/staging/
+data/curated/
+data/_manifest.jsonl
 !data/README.md
 
 # Reports/figures generated locally

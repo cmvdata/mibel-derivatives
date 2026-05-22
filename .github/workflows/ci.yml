@@ -30,4 +30,4 @@ jobs:
         continue-on-error: true  # non-strict to start; tighten later
 
       - name: Test
-        run: uv run pytest -m "not slow and not monte_carlo"
+        run: uv run pytest -m "not slow and not monte_carlo and not network"
