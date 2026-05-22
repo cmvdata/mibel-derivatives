@@ -1,0 +1,70 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# uv: lockfile IS committed (apps need reproducibility)
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+notebooks/*.executed.ipynb
+
+# Env
+.env
+.env.local
+
+# Data (never commit raw or processed; only schemas and READMEs)
+data/raw/
+data/processed/
+data/external/
+data/cache/
+!data/README.md
+
+# Reports/figures generated locally
+reports/figures/*.png
+reports/figures/*.pdf
+reports/figures/*.svg
+!reports/figures/.gitkeep
+
+# Regenerable diagnostic outputs (markdown summaries stay in git)
+reports/diagnostics/*.parquet
+reports/diagnostics/*.csv
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Claude Code local settings (project-wide settings.json IS committed if used)
+.claude/settings.local.json
+
+# Local audit/dump tooling (not part of the product)
+code_bundle.txt
+
+# Reference PDFs (papers etc.) kept locally for audit, not redistributed
+reports/*.pdf
