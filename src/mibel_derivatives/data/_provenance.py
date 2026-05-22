@@ -66,7 +66,12 @@ def record_from_download(
     params: dict[str, Any] | None = None,
 ) -> ProvenanceRecord:
     """Build a record from an in-memory payload that was just written to disk."""
-    rel = raw_path.resolve().relative_to(ROOT).as_posix()
+    resolved = raw_path.resolve()
+    try:
+        rel = resolved.relative_to(ROOT).as_posix()
+    except ValueError:
+        # Outside the repo (e.g. pytest tmp_path) — record absolute path.
+        rel = resolved.as_posix()
     return ProvenanceRecord(
         source=source,
         url=url,
