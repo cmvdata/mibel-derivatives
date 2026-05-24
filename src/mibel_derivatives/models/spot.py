@@ -206,8 +206,57 @@ def simulate(
     The returned array has shape ``(n_paths, n_hours)`` in EUR/MWh
     (the shift c is removed before returning, so negative samples are
     possible when the simulated log-shifted price is below ``log(c)``).
+
+    Discretisation:
+
+        Z_{t+1} = φ Z_t + σ_{h(t+1)} √((1−φ²)/(2κ)) · ε_t  +  J_t · B_t
+
+    where ε_t ~ N(0, 1), B_t ~ Bernoulli(λ) and J_t is drawn from the
+    Kou asymmetric double-exponential (Bernoulli is exact for
+    Poisson-per-hour with ``λ Δt ≪ 1``; for ``λ Δt = 0.01`` the
+    probability of two jumps in the same hour is below 5e-5 and is
+    ignored). Reproducible given ``seed``.
     """
-    raise NotImplementedError
+    if start.tz is None:
+        raise ValueError("start must be a UTC-tz-aware Timestamp")
+    if n_hours <= 0 or n_paths <= 0:
+        raise ValueError("n_hours and n_paths must be positive")
+
+    rng = np.random.default_rng(seed=seed)
+    idx = pd.date_range(start=start, periods=n_hours, freq="h")
+    if idx.tz is None:
+        idx = idx.tz_localize(start.tz)
+
+    seasonal_t = _seasonal_predict(params.seasonality, idx).to_numpy()
+
+    kappa = params.kappa
+    phi = float(np.exp(-kappa))
+    factor = float(np.sqrt((1.0 - phi**2) / (2.0 * kappa)))
+    hours = np.asarray(idx.hour)
+    sigma_step = params.sigma_by_hour[hours] * factor  # (n_hours,)
+
+    normals = rng.standard_normal((n_paths, n_hours))
+    jump_occurs = rng.random((n_paths, n_hours)) < params.jump_intensity
+    n_jumps_total = int(jump_occurs.sum())
+    jump_grid = np.zeros((n_paths, n_hours))
+    if n_jumps_total > 0:
+        is_up = rng.random(n_jumps_total) < params.jump_p_up
+        sizes_up = rng.exponential(1.0 / params.jump_eta_up, n_jumps_total)
+        sizes_down = -rng.exponential(1.0 / params.jump_eta_down, n_jumps_total)
+        jump_sizes_flat = np.where(is_up, sizes_up, sizes_down)
+        jump_grid[jump_occurs] = jump_sizes_flat
+
+    z = np.empty((n_paths, n_hours))
+    z[:, 0] = initial_residual
+    for t in range(1, n_hours):
+        z[:, t] = (
+            phi * z[:, t - 1]
+            + sigma_step[t] * normals[:, t]
+            + jump_grid[:, t]
+        )
+
+    log_p = seasonal_t[np.newaxis, :] + z
+    return np.exp(log_p) - params.price_shift
 
 
 # ---- Internals -------------------------------------------------------------

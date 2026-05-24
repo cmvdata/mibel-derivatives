@@ -68,30 +68,42 @@ def test_params_dataclass_is_frozen_and_constructs() -> None:
         params.kappa = 0.2  # frozen dataclass
 
 
-def test_simulate_signature_raises_until_implemented() -> None:
+def _trivial_params(**overrides) -> spot.SpotModelParams:
+    """Helper: a no-seasonality, no-jumps SpotModelParams for simulation tests."""
     seasonality = spot.Seasonality(
-        intercept=0.0,
+        intercept=overrides.get("intercept", 4.0),
         fourier_coefs=np.zeros(8),
         dow_coefs=np.zeros(6),
         hod_coefs=np.zeros(23),
         fourier_harmonics=4,
     )
-    params = spot.SpotModelParams(
+    return spot.SpotModelParams(
         seasonality=seasonality,
-        price_shift=10.0,
-        kappa=0.1,
-        sigma_by_hour=np.full(24, 0.05),
-        jump_intensity=0.001,
-        jump_p_up=0.5,
-        jump_eta_up=10.0,
-        jump_eta_down=10.0,
+        price_shift=overrides.get("price_shift", 10.0),
+        kappa=overrides.get("kappa", 0.10),
+        sigma_by_hour=overrides.get("sigma_by_hour", np.full(24, 0.10)),
+        jump_intensity=overrides.get("jump_intensity", 0.0),
+        jump_p_up=overrides.get("jump_p_up", 0.5),
+        jump_eta_up=overrides.get("jump_eta_up", 2.0),
+        jump_eta_down=overrides.get("jump_eta_down", 2.0),
     )
-    with pytest.raises(NotImplementedError):
+
+
+def test_simulate_rejects_tz_naive_start() -> None:
+    with pytest.raises(ValueError, match="UTC"):
         spot.simulate(
-            params,
+            _trivial_params(),
+            start=pd.Timestamp("2025-01-01"),
+            n_hours=24, n_paths=10,
+        )
+
+
+def test_simulate_rejects_nonpositive_dimensions() -> None:
+    with pytest.raises(ValueError):
+        spot.simulate(
+            _trivial_params(),
             start=pd.Timestamp("2025-01-01", tz="UTC"),
-            n_hours=24,
-            n_paths=10,
+            n_hours=0, n_paths=10,
         )
 
 
@@ -474,3 +486,95 @@ def test_fit_end_to_end_recovers_all_parameters() -> None:
     assert result.n_obs == n_hours
     assert isinstance(result.residuals, pd.Series)
     assert len(result.residual_returns) == n_hours - 1
+
+
+# ---- E. Simulation ---------------------------------------------------------
+
+
+def test_simulate_shape_and_reproducibility() -> None:
+    params = _trivial_params(jump_intensity=0.001)
+    start = pd.Timestamp("2025-01-01", tz="UTC")
+    a = spot.simulate(params, start, n_hours=240, n_paths=50, seed=42)
+    b = spot.simulate(params, start, n_hours=240, n_paths=50, seed=42)
+    c = spot.simulate(params, start, n_hours=240, n_paths=50, seed=7)
+    assert a.shape == (50, 240)
+    np.testing.assert_array_equal(a, b)
+    assert not np.array_equal(a, c)
+
+
+def test_simulate_initial_residual_propagates() -> None:
+    """A non-zero initial_residual must show up in t=0 of every path."""
+    params = _trivial_params(intercept=0.0)
+    start = pd.Timestamp("2025-01-01", tz="UTC")
+    a = spot.simulate(params, start, n_hours=10, n_paths=5, initial_residual=0.0, seed=1)
+    b = spot.simulate(params, start, n_hours=10, n_paths=5, initial_residual=1.5, seed=1)
+    # t=0 reflects exp(intercept + initial_residual) - shift
+    # a: exp(0 + 0) - 10 = -9; b: exp(1.5) - 10 ≈ -5.52
+    np.testing.assert_allclose(a[:, 0], np.exp(0.0) - 10.0, atol=1e-9)
+    np.testing.assert_allclose(b[:, 0], np.exp(1.5) - 10.0, atol=1e-9)
+
+
+def test_simulate_long_run_residual_variance_matches_theory() -> None:
+    """For OU with constant σ and no jumps, Var(Z_∞) = σ² / (2κ)."""
+    params = _trivial_params(
+        intercept=0.0,
+        kappa=0.10,
+        sigma_by_hour=np.full(24, 0.15),
+        jump_intensity=0.0,
+    )
+    start = pd.Timestamp("2025-01-01", tz="UTC")
+    paths = spot.simulate(params, start, n_hours=24 * 365, n_paths=200, seed=42)
+    log_p = np.log(paths + params.price_shift)
+    # Drop the first half as burn-in (initial_residual=0 takes a while to
+    # forget at κ=0.10 → half-life ~ ln 2 / 0.10 ≈ 7 h, so 6 months is plenty)
+    burn = paths.shape[1] // 2
+    var_observed = float(log_p[:, burn:].var())
+    var_theoretical = 0.15**2 / (2 * 0.10)
+    assert abs(var_observed - var_theoretical) / var_theoretical < 0.15
+
+
+def test_simulate_jumps_increase_dispersion() -> None:
+    """Higher jump intensity ⇒ higher empirical price std (same seed)."""
+    start = pd.Timestamp("2025-01-01", tz="UTC")
+    p_no_jumps = _trivial_params(jump_intensity=0.0)
+    p_with_jumps = _trivial_params(jump_intensity=0.02, jump_eta_up=1.0, jump_eta_down=1.0)
+    a = spot.simulate(p_no_jumps, start, n_hours=24 * 30, n_paths=100, seed=1)
+    b = spot.simulate(p_with_jumps, start, n_hours=24 * 30, n_paths=100, seed=1)
+    assert float(b.std()) > float(a.std())
+
+
+def test_simulate_seasonal_profile_appears_in_paths() -> None:
+    """Strong HoD seasonality must show up as an hour-of-day price profile
+    when averaged across many paths."""
+    seasonality = spot.Seasonality(
+        intercept=4.0,
+        fourier_coefs=np.zeros(8),
+        dow_coefs=np.zeros(6),
+        # Tall peak at midday (hour 12 UTC), low at hours 1-3.
+        hod_coefs=np.array([
+            -0.5, -0.5, -0.5, -0.3, -0.1, 0.0, 0.2, 0.4,
+            0.6, 0.7, 0.8, 0.9, 0.6, 0.3, 0.1, -0.1,
+            0.2, 0.4, 0.3, 0.1, -0.1, -0.2, -0.3, -0.4,
+        ])[:23],  # hod_1..hod_23 (hour 0 is reference)
+        fourier_harmonics=4,
+    )
+    params = spot.SpotModelParams(
+        seasonality=seasonality, price_shift=10.0, kappa=0.5,
+        sigma_by_hour=np.full(24, 0.05),
+        jump_intensity=0.0, jump_p_up=0.5,
+        jump_eta_up=1.0, jump_eta_down=1.0,
+    )
+    paths = spot.simulate(
+        params,
+        pd.Timestamp("2025-01-01", tz="UTC"),
+        n_hours=24 * 14, n_paths=200, seed=42,
+    )
+    # Drop first 24 h (burn-in from initial_residual=0).
+    paths = paths[:, 24:]
+    n_hours = paths.shape[1]
+    hours_grid = (np.arange(n_hours) + 24) % 24
+    mean_by_hour = np.array(
+        [paths[:, hours_grid == h].mean() for h in range(24)]
+    )
+    # Hour 12 (peak) must produce higher mean prices than hour 1 (trough).
+    assert mean_by_hour[12] > mean_by_hour[1]
