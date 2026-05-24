@@ -49,6 +49,7 @@ reports/figures/*.svg
 # Regenerable diagnostic outputs (markdown summaries stay in git)
 reports/diagnostics/*.parquet
 reports/diagnostics/*.csv
+reports/_*.json
 
 # OS
 .DS_Store

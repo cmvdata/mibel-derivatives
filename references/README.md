@@ -1,8 +1,9 @@
 # References
 
-Working bibliography for phase 2 (modelling). PDFs of the five papers
-are committed alongside this README; total ~4.5 MB. Each row of the
-table below records the bibliographic detail and the specific piece of
+Working bibliography for phase 2 (modelling). PDFs of the five primary
+papers are committed alongside this README; total ~4.5 MB. Additional
+methodological references are listed below without PDFs. Each row of
+the table records the bibliographic detail and the specific piece of
 the modelling stack that the paper underpins.
 
 | File | Authors | Year | Journal / source | Role in the project |
@@ -13,9 +14,16 @@ the modelling stack that the paper underpins.
 | `Longstaff.pdf` | Francis A. Longstaff, Eduardo S. Schwartz | 2001 | *Review of Financial Studies* 14(1), 113-147 — "Valuing American Options by Simulation: A Simple Least-Squares Approach" | The Least-Squares Monte Carlo (LSM) regression-based estimator of conditional continuation values. **Backbone of the swing-option pricer** (multi-exercise, path-dependent) and of any **early-exercise leg in the tolling agreement**. |
 | `the-iberian-electricity-market-analysis-of-the-risk-premium-3yye5p0ne4.pdf` | Márcio Ferreira, Helder Sebastião | 2018 | *Journal of Energy Markets* 11(2), 61-82 — "The Iberian electricity market: analysis of the risk premium in an illiquid market" | Empirical characterisation of the ex-post **MIBEL forward risk premium** (2006-2017): seasonality (winter ≫ summer), term-structure decay, predictability of the sign in the last 7 days before maturity. **Calibration target and sanity-check** for the risk-neutral / physical wedge implied by the Schwartz-Smith fit to OMIP futures. |
 
+## Additional methodological references (no PDF on disk)
+
+| Authors | Year | Citation | Role |
+|---|---:|---|---|
+| Álvaro Cartea, Marcelo G. Figueroa | 2005 | "Pricing in Electricity Markets: A Mean Reverting Jump Diffusion Model with Seasonality", *Applied Mathematical Finance* 12(4), 313-335 | Adds the **Kou-style asymmetric jump-diffusion** layer on top of the Lucia-Schwartz seasonal-plus-OU skeleton. Reference for `models/spot.py` jump component (Lucia-Schwartz did not model jumps). |
+| Steven G. Kou | 2002 | "A Jump-Diffusion Model for Option Pricing", *Management Science* 48(8), 1086-1101 | The **asymmetric double-exponential jump-size distribution** used in `models/spot.py` `_mle_jumps`. |
+
 ## How phase 2 modules map to these papers
 
-- `models/spot/` — Lucia-Schwartz 2002 (primary), Schwartz 1997 (baseline).
+- `models/spot.py` — Lucia-Schwartz 2002 (seasonality + OU baseline) + Cartea-Figueroa 2005 (jump-diffusion extension) + Kou 2002 (jump-size distribution). Schwartz 1997 as the foundational OU treatment.
 - `models/schwartz_smith/` — Schwartz-Smith 2000 (primary), Schwartz 1997 (precursor).
 - `models/swing/` — Longstaff-Schwartz 2001.
 - `models/tolling/` — Schwartz-Smith 2000 (long-term factor for fuel/power spread) + Longstaff-Schwartz 2001 (operational option exercise).
