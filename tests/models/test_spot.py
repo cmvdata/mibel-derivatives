@@ -30,11 +30,20 @@ def test_module_exposes_public_api() -> None:
     assert spot.JUMP_THRESHOLD_K == 4.0
 
 
-def test_fit_signature_raises_until_implemented() -> None:
-    """Commit A: the public API exists but the body is a placeholder.
-    This test will be replaced by a real recovery test in commit B/D."""
-    with pytest.raises(NotImplementedError):
-        spot.fit(pd.Series(dtype=float))
+def test_fit_rejects_tz_naive_index() -> None:
+    s = pd.Series(
+        np.full(24 * 60, 50.0),
+        index=pd.date_range("2020-01-01", periods=24 * 60, freq="h"),
+    )
+    with pytest.raises(ValueError, match="UTC"):
+        spot.fit(s)
+
+
+def test_fit_rejects_too_few_observations() -> None:
+    idx = _hourly_utc("2020-01-01", 24 * 10)  # only 10 days
+    s = pd.Series(np.full(len(idx), 50.0), index=idx)
+    with pytest.raises(ValueError, match="30 days"):
+        spot.fit(s)
 
 
 def test_params_dataclass_is_frozen_and_constructs() -> None:
@@ -271,3 +280,197 @@ def test_detect_jumps_converges_within_max_iter() -> None:
     flagged_full = spot._detect_jumps(rr, k=4.0, max_iter=10)
     # The full iteration finds at least as many jumps as the truncated one.
     assert int(flagged_full.sum()) >= int(flagged_short.sum())
+
+
+# ---- D. MLE OU + Kou jumps -------------------------------------------------
+
+
+def _simulate_ou_path(
+    n_hours: int,
+    kappa: float,
+    sigma_by_hour: np.ndarray,
+    *,
+    seed: int,
+    start: str = "2020-01-01",
+) -> pd.Series:
+    """Generate a discrete OU path Z_t with hour-of-day σ heteroskedasticity."""
+    rng = np.random.default_rng(seed=seed)
+    idx = _hourly_utc(start, n_hours)
+    hours = np.asarray(idx.hour)
+    phi = float(np.exp(-kappa))
+    factor = np.sqrt((1.0 - phi**2) / (2.0 * kappa))
+    z = np.zeros(n_hours)
+    for t in range(1, n_hours):
+        z[t] = phi * z[t - 1] + sigma_by_hour[hours[t]] * factor * rng.standard_normal()
+    return pd.Series(z, index=idx, name="z")
+
+
+def test_mle_ou_recovers_kappa_and_sigma_no_jumps() -> None:
+    n_hours = 24 * 365 * 3
+    true_kappa = 0.10
+    true_sigma_h = 0.05 + 0.15 * np.sin(np.linspace(0, 2 * np.pi, 24, endpoint=False)) ** 2
+    z = _simulate_ou_path(n_hours, true_kappa, true_sigma_h, seed=42)
+    # No jumps planted; the mask aligned with returns is all-False.
+    jump_mask = pd.Series(False, index=z.index[1:])
+
+    kappa_hat, sigma_h_hat = spot._mle_ou(z, jump_mask)
+
+    rel_err_k = abs(kappa_hat - true_kappa) / true_kappa
+    assert rel_err_k < 0.10, f"κ true={true_kappa:.4f} hat={kappa_hat:.4f}"
+    np.testing.assert_allclose(sigma_h_hat, true_sigma_h, rtol=0.10, atol=0.01)
+
+
+def _simulate_jump_diffusion_path(
+    n_hours: int,
+    kappa: float,
+    sigma_by_hour: np.ndarray,
+    jump_times: np.ndarray,
+    jump_sizes: np.ndarray,
+    *,
+    seed: int,
+    start: str = "2020-01-01",
+) -> pd.Series:
+    """OU + Poisson jumps: jumps push the level and OU continues from there.
+
+    ``jump_times`` indexes into the Z-series in [1, n_hours); the size at
+    ``jump_times[i]`` is added to z[jump_times[i]] AFTER the OU step.
+    """
+    rng = np.random.default_rng(seed=seed)
+    idx = _hourly_utc(start, n_hours)
+    hours = np.asarray(idx.hour)
+    phi = float(np.exp(-kappa))
+    factor = np.sqrt((1.0 - phi**2) / (2.0 * kappa))
+    jump_at = dict(zip(jump_times.tolist(), jump_sizes.tolist()))
+    z = np.zeros(n_hours)
+    for t in range(1, n_hours):
+        z[t] = phi * z[t - 1] + sigma_by_hour[hours[t]] * factor * rng.standard_normal()
+        if t in jump_at:
+            z[t] = z[t] + jump_at[t]
+    return pd.Series(z, index=idx, name="z")
+
+
+def test_mle_ou_robust_to_planted_jumps_when_masked() -> None:
+    """When the jump mask correctly identifies planted jumps, the OU
+    estimator still recovers κ and σ_h within tolerance."""
+    rng = np.random.default_rng(seed=7)
+    n_hours = 24 * 365 * 3
+    true_kappa = 0.08
+    true_sigma_h = np.full(24, 0.12)
+    # Choose jump times in [1, n_hours) so z.diff() at that index is the
+    # contaminated return.
+    jump_times = rng.choice(np.arange(1, n_hours), size=100, replace=False)
+    jump_sizes = rng.choice([-1.5, 1.5], size=100)
+    z_series = _simulate_jump_diffusion_path(
+        n_hours, true_kappa, true_sigma_h,
+        jump_times, jump_sizes, seed=7,
+    )
+
+    # jump_mask aligns with returns (index = z_series.index[1:]).
+    # A jump at z-position t corresponds to return-position t-1 within
+    # that index (since residual_returns.index[i] = z.index[i+1]).
+    jump_mask = pd.Series(False, index=z_series.index[1:])
+    jump_mask.iloc[jump_times - 1] = True
+
+    kappa_hat, sigma_h_hat = spot._mle_ou(z_series, jump_mask)
+    assert abs(kappa_hat - true_kappa) / true_kappa < 0.15, (
+        f"κ true={true_kappa:.4f} hat={kappa_hat:.4f}"
+    )
+    np.testing.assert_allclose(sigma_h_hat, true_sigma_h, rtol=0.15, atol=0.02)
+
+
+def test_mle_jumps_recovers_kou_params() -> None:
+    rng = np.random.default_rng(seed=123)
+    n_total = 24 * 365 * 5
+    n_jumps = 250  # 50 jumps/year × 5 years
+    true_lambda = n_jumps / n_total
+    true_p_up = 0.70
+    true_eta_up = 5.0
+    true_eta_down = 8.0
+
+    is_up = rng.random(n_jumps) < true_p_up
+    mags_up = rng.exponential(1.0 / true_eta_up, size=n_jumps)
+    mags_down = -rng.exponential(1.0 / true_eta_down, size=n_jumps)
+    sizes = np.where(is_up, mags_up, mags_down)
+    jumps = pd.Series(
+        sizes, index=_hourly_utc("2019-01-01", n_jumps), name="jumps",
+    )
+
+    intensity, p_up, eta_up, eta_down = spot._mle_jumps(jumps, n_total)
+    assert abs(intensity - true_lambda) / true_lambda < 0.01
+    assert abs(p_up - true_p_up) < 0.05
+    assert abs(eta_up - true_eta_up) / true_eta_up < 0.15
+    assert abs(eta_down - true_eta_down) / true_eta_down < 0.15
+
+
+def test_mle_jumps_handles_empty_input() -> None:
+    intensity, p_up, eta_up, eta_down = spot._mle_jumps(
+        pd.Series(dtype=float), n_total_hours=24 * 30,
+    )
+    assert intensity == 0.0
+    assert p_up == 0.5
+    assert eta_up == 1.0 and eta_down == 1.0
+
+
+def test_fit_end_to_end_recovers_all_parameters() -> None:
+    """Build a synthetic OMIE-like price series from known seasonality +
+    OU + Kou jumps; the public fit() must recover each component."""
+    rng = np.random.default_rng(seed=2026)
+    n_hours = 24 * 365 * 4  # 4 years hourly
+
+    idx = _hourly_utc("2020-01-01", n_hours)
+    X = spot._seasonal_design_matrix(idx, harmonics=4).to_numpy()
+
+    true_intercept = 3.8
+    true_fourier = np.array([0.20, -0.10, 0.05, 0.0, 0.0, 0.0, 0.0, 0.0])
+    true_dow = np.array([0.05, 0.06, 0.05, 0.04, 0.02, -0.10])
+    true_hod = np.linspace(-0.20, 0.40, 23)
+    true_beta = np.concatenate([[true_intercept], true_fourier, true_dow, true_hod])
+    seasonal = X @ true_beta
+
+    true_kappa = 0.12
+    true_sigma_h = (
+        0.08 + 0.06 * np.sin(np.linspace(0, 2 * np.pi, 24, endpoint=False)) ** 2
+    )
+    n_jumps_planted = 200
+    jump_times = rng.choice(np.arange(1, n_hours), size=n_jumps_planted, replace=False)
+    is_up = rng.random(n_jumps_planted) < 0.70
+    # η chosen so the typical jump magnitude (1/η) is several × σ_h ≈ 0.10:
+    # mean_up = 0.83, mean_down = 0.50. With k=4·σ ≈ 0.4-0.6 most jumps
+    # are detectable.
+    true_eta_up = 1.2
+    true_eta_down = 2.0
+    sizes_up = rng.exponential(1.0 / true_eta_up, n_jumps_planted)
+    sizes_down = -rng.exponential(1.0 / true_eta_down, n_jumps_planted)
+    jump_sizes_arr = np.where(is_up, sizes_up, sizes_down)
+    z = _simulate_jump_diffusion_path(
+        n_hours, true_kappa, true_sigma_h,
+        jump_times, jump_sizes_arr, seed=2026,
+    ).to_numpy()
+
+    log_p = seasonal + z
+    prices = pd.Series(np.exp(log_p) - 10.0, index=idx, name="price_eur_mwh")
+
+    result = spot.fit(prices)
+    p = result.params
+
+    assert abs(p.seasonality.intercept - true_intercept) < 0.05
+    assert abs(p.kappa - true_kappa) / true_kappa < 0.20
+    np.testing.assert_allclose(p.sigma_by_hour, true_sigma_h, rtol=0.25, atol=0.02)
+    # The k=4 threshold cannot identify the small-amplitude tail of the
+    # exponential; that mass is empirically inseparable from σ-driven noise.
+    # We require recovery of the LARGE-jump fraction only.
+    large_planted = int(np.sum(np.abs(jump_sizes_arr) > 0.40))
+    assert 0.80 * large_planted <= result.n_jumps <= 1.50 * large_planted, (
+        f"detected {result.n_jumps} jumps; large planted {large_planted}"
+    )
+    # Asymmetry direction must be recovered (more upward jumps).
+    assert p.jump_p_up > 0.55
+    # η rates are biased high because small jumps drop out; just check
+    # they are positive and finite (the magnitude check is a separate
+    # MLE test on a synthetic Kou sample).
+    assert p.jump_eta_up > 0.0 and np.isfinite(p.jump_eta_up)
+    assert p.jump_eta_down > 0.0 and np.isfinite(p.jump_eta_down)
+    # Result containers populated
+    assert result.n_obs == n_hours
+    assert isinstance(result.residuals, pd.Series)
+    assert len(result.residual_returns) == n_hours - 1
