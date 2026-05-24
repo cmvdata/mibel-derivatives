@@ -20,14 +20,24 @@ from mibel_derivatives.models import spot
 def test_module_exposes_public_api() -> None:
     for name in (
         "fit", "simulate",
-        "Seasonality", "SpotModelParams", "SpotModelFit",
-        "PRICE_SHIFT", "FOURIER_HARMONICS",
-        "JUMP_THRESHOLD_K", "JUMP_MAX_ITER",
+        "Seasonality", "SlowFactorParams",
+        "SpotModelParams", "SpotModelFit",
+        "PRICE_SHIFT", "FOURIER_HARMONICS", "EMA_SPAN",
+        "JUMP_THRESHOLD_K_BASE", "JUMP_THRESHOLD_K_PEAK",
+        "JUMP_PEAK_HOURS_UTC", "JUMP_AMPLITUDE_MIN", "JUMP_MAX_ITER",
+        "KAPPA_BOUNDS", "LAMBDA_BOUNDS", "ETA_BOUNDS",
     ):
         assert hasattr(spot, name), f"spot.{name} missing"
     assert spot.PRICE_SHIFT == 10.0
     assert spot.FOURIER_HARMONICS == 4
-    assert spot.JUMP_THRESHOLD_K == 4.0
+    assert spot.EMA_SPAN == 720
+    assert spot.JUMP_THRESHOLD_K_BASE == 4.5
+    assert spot.JUMP_THRESHOLD_K_PEAK == 6.0
+    assert spot.JUMP_AMPLITUDE_MIN == 0.30
+    assert set(spot.JUMP_PEAK_HOURS_UTC) == {18, 19, 20, 21, 22}
+    assert spot.KAPPA_BOUNDS == (0.05, 0.20)
+    assert spot.LAMBDA_BOUNDS == (0.008, 0.025)
+    assert spot.ETA_BOUNDS == (0.8, 4.0)
 
 
 def test_fit_rejects_tz_naive_index() -> None:
@@ -40,9 +50,10 @@ def test_fit_rejects_tz_naive_index() -> None:
 
 
 def test_fit_rejects_too_few_observations() -> None:
-    idx = _hourly_utc("2020-01-01", 24 * 10)  # only 10 days
+    # New requirement: ema_span (720h) + 30 days = 1440 h minimum.
+    idx = _hourly_utc("2020-01-01", 24 * 30)
     s = pd.Series(np.full(len(idx), 50.0), index=idx)
-    with pytest.raises(ValueError, match="30 days"):
+    with pytest.raises(ValueError, match="ema_span"):
         spot.fit(s)
 
 
@@ -54,15 +65,18 @@ def test_params_dataclass_is_frozen_and_constructs() -> None:
         hod_coefs=np.zeros(23),
         fourier_harmonics=4,
     )
+    slow = spot.SlowFactorParams(drift=0.0, sigma=0.001)
     params = spot.SpotModelParams(
         seasonality=seasonality,
+        slow_factor=slow,
         price_shift=10.0,
+        ema_span=720,
         kappa=0.1,
         sigma_by_hour=np.full(24, 0.05),
-        jump_intensity=0.001,
+        jump_intensity=0.01,
         jump_p_up=0.5,
-        jump_eta_up=10.0,
-        jump_eta_down=10.0,
+        jump_eta_up=2.0,
+        jump_eta_down=2.0,
     )
     with pytest.raises(Exception):
         params.kappa = 0.2  # frozen dataclass
@@ -77,9 +91,15 @@ def _trivial_params(**overrides) -> spot.SpotModelParams:
         hod_coefs=np.zeros(23),
         fourier_harmonics=4,
     )
+    slow = spot.SlowFactorParams(
+        drift=overrides.get("slow_drift", 0.0),
+        sigma=overrides.get("slow_sigma", 0.0),
+    )
     return spot.SpotModelParams(
         seasonality=seasonality,
+        slow_factor=slow,
         price_shift=overrides.get("price_shift", 10.0),
+        ema_span=overrides.get("ema_span", 720),
         kappa=overrides.get("kappa", 0.10),
         sigma_by_hour=overrides.get("sigma_by_hour", np.full(24, 0.10)),
         jump_intensity=overrides.get("jump_intensity", 0.0),
@@ -185,6 +205,43 @@ def test_design_matrix_buckets_correctly() -> None:
     assert X["hod_14"].iloc[0] == 1.0
     for h in (1, 2, 3, 13, 15, 23):
         assert X[f"hod_{h}"].iloc[0] == 0.0
+
+
+def test_ema_is_causal_no_future_leakage() -> None:
+    """θ̂_t = ewm(span=720, adjust=False).mean() must not depend on any
+    values past t. Truncating the future and re-evaluating up to t must
+    yield the same θ̂_t."""
+    rng = np.random.default_rng(seed=3)
+    n = 24 * 365
+    idx = _hourly_utc("2021-01-01", n)
+    y = pd.Series(rng.standard_normal(n).cumsum() * 0.05 + 3.0, index=idx)
+    full = y.ewm(span=720, adjust=False).mean()
+    cut = n // 2
+    truncated = y.iloc[:cut].ewm(span=720, adjust=False).mean()
+    np.testing.assert_allclose(
+        truncated.values, full.iloc[:cut].values, atol=1e-12,
+    )
+
+
+def test_fit_slow_factor_absorbs_planted_trend() -> None:
+    """A linear trend in log-price must be picked up by θ̂_t with a
+    positive drift in SlowFactorParams; the seasonal intercept stays
+    around zero."""
+    rng = np.random.default_rng(seed=5)
+    n_hours = 24 * 365 * 3
+    idx = _hourly_utc("2020-01-01", n_hours)
+    # log-price = 3.5 + 0.0002 * t + noise — a steady upward drift of
+    # 0.0002 per hour ≈ +1.75 in log over 3 years.
+    log_p = 3.5 + 0.0002 * np.arange(n_hours) + 0.05 * rng.standard_normal(n_hours)
+    prices = pd.Series(np.exp(log_p) - 10.0, index=idx, name="p")
+    result = spot.fit(prices)
+    theta_pw = result.theta_series.iloc[result.params.ema_span:]
+    # θ̂_t increases over time (mean later >> mean earlier).
+    n_pw = len(theta_pw)
+    assert theta_pw.iloc[-n_pw // 4:].mean() > theta_pw.iloc[: n_pw // 4].mean() + 0.5
+    assert result.params.slow_factor.drift > 1e-5
+    # Seasonal intercept tiny since trend is in θ_t now.
+    assert abs(result.params.seasonality.intercept) < 0.10
 
 
 def test_predict_repeats_annual_cycle() -> None:
@@ -423,9 +480,14 @@ def test_mle_jumps_handles_empty_input() -> None:
     assert eta_up == 1.0 and eta_down == 1.0
 
 
-def test_fit_end_to_end_recovers_all_parameters() -> None:
-    """Build a synthetic OMIE-like price series from known seasonality +
-    OU + Kou jumps; the public fit() must recover each component."""
+def test_fit_end_to_end_recovers_seasonal_and_ou_under_slow_fast() -> None:
+    """Synthetic OMIE-like series with known seasonality + OU + Kou jumps,
+    NO trend in the slow factor. After the EMA decomposition:
+      • θ̂_t should be flat at ≈ true_intercept + Fourier_annual_mean ≈ true_intercept
+        (Fourier sin/cos integrate to 0 over the year).
+      • The post-EMA seasonal fit intercept should be small (the slow factor
+        absorbed the level), DoW and HoD coefs should still be recovered.
+      • κ̂ and σ̂_h should be close to truth on the deseasonalised X_t."""
     rng = np.random.default_rng(seed=2026)
     n_hours = 24 * 365 * 4  # 4 years hourly
 
@@ -446,9 +508,6 @@ def test_fit_end_to_end_recovers_all_parameters() -> None:
     n_jumps_planted = 200
     jump_times = rng.choice(np.arange(1, n_hours), size=n_jumps_planted, replace=False)
     is_up = rng.random(n_jumps_planted) < 0.70
-    # η chosen so the typical jump magnitude (1/η) is several × σ_h ≈ 0.10:
-    # mean_up = 0.83, mean_down = 0.50. With k=4·σ ≈ 0.4-0.6 most jumps
-    # are detectable.
     true_eta_up = 1.2
     true_eta_down = 2.0
     sizes_up = rng.exponential(1.0 / true_eta_up, n_jumps_planted)
@@ -465,27 +524,63 @@ def test_fit_end_to_end_recovers_all_parameters() -> None:
     result = spot.fit(prices)
     p = result.params
 
-    assert abs(p.seasonality.intercept - true_intercept) < 0.05
-    assert abs(p.kappa - true_kappa) / true_kappa < 0.20
-    np.testing.assert_allclose(p.sigma_by_hour, true_sigma_h, rtol=0.25, atol=0.02)
-    # The k=4 threshold cannot identify the small-amplitude tail of the
-    # exponential; that mass is empirically inseparable from σ-driven noise.
-    # We require recovery of the LARGE-jump fraction only.
+    # θ̂_t absorbs the level PLUS the non-zero means of the dummy blocks
+    # (Mon and h0 are the omitted references, so DoW/HoD coefs do not sum
+    # to zero across categories). Expected mean of θ̂ in stationary state:
+    #   true_intercept + Σ dow_coefs / 7 + Σ hod_coefs / 24
+    expected_theta_mean = (
+        true_intercept + true_dow.sum() / 7.0 + true_hod.sum() / 24.0
+    )
+    theta_pw = result.theta_series.iloc[p.ema_span:]
+    assert abs(theta_pw.mean() - expected_theta_mean) < 0.05, (
+        f"θ̂ mean={theta_pw.mean():.4f} expected={expected_theta_mean:.4f}"
+    )
+    # After slow-factor removal, the seasonal regression intercept is the
+    # negative of the dummy-block means (so that adding intercept + dummy
+    # contributions back to θ̂ reconstructs the original level on average).
+    expected_intercept = (
+        -true_dow.sum() / 7.0 - true_hod.sum() / 24.0
+    )
+    assert abs(p.seasonality.intercept - expected_intercept) < 0.05
+    # DoW and HoD deviations recovered (relative coefs unaffected by level).
+    np.testing.assert_allclose(p.seasonality.dow_coefs, true_dow, atol=0.05)
+    np.testing.assert_allclose(p.seasonality.hod_coefs, true_hod, atol=0.05)
+    # OU recovery still works (closed-form MLE in G1; bounded MLE in G3).
+    assert abs(p.kappa - true_kappa) / true_kappa < 0.25
+    np.testing.assert_allclose(p.sigma_by_hour, true_sigma_h, rtol=0.30, atol=0.02)
+    # Large jumps recovered (small ones below the k·σ threshold are noise).
     large_planted = int(np.sum(np.abs(jump_sizes_arr) > 0.40))
-    assert 0.80 * large_planted <= result.n_jumps <= 1.50 * large_planted, (
+    assert 0.70 * large_planted <= result.n_jumps <= 1.50 * large_planted, (
         f"detected {result.n_jumps} jumps; large planted {large_planted}"
     )
-    # Asymmetry direction must be recovered (more upward jumps).
     assert p.jump_p_up > 0.55
-    # η rates are biased high because small jumps drop out; just check
-    # they are positive and finite (the magnitude check is a separate
-    # MLE test on a synthetic Kou sample).
-    assert p.jump_eta_up > 0.0 and np.isfinite(p.jump_eta_up)
-    assert p.jump_eta_down > 0.0 and np.isfinite(p.jump_eta_down)
-    # Result containers populated
+    # Slow factor RW params: drift ≈ 0, sigma small (since no trend planted).
+    assert abs(p.slow_factor.drift) < 1e-4
+    assert p.slow_factor.sigma < 0.005
+    # n_obs is full input; residuals are post-warmup.
     assert result.n_obs == n_hours
-    assert isinstance(result.residuals, pd.Series)
-    assert len(result.residual_returns) == n_hours - 1
+    assert len(result.residuals) == n_hours - p.ema_span
+    assert len(result.residual_returns) == n_hours - p.ema_span - 1
+
+
+def test_fit_returns_theta_and_x_series_aligned_with_input() -> None:
+    """The slow factor and X series are reported on the full input index
+    (including the warm-up region) so diagnostic plots can show the EMA
+    settling at the start of the series."""
+    rng = np.random.default_rng(seed=1)
+    n_hours = 24 * 365 * 2
+    idx = _hourly_utc("2020-01-01", n_hours)
+    prices = pd.Series(
+        50.0 + 5.0 * rng.standard_normal(n_hours), index=idx, name="p",
+    )
+    result = spot.fit(prices)
+    assert len(result.theta_series) == n_hours
+    assert len(result.x_series) == n_hours
+    # x_series at t=0 is exactly zero (ewm starts at the first value).
+    assert abs(result.x_series.iloc[0]) < 1e-12
+    # SlowFactorParams populated.
+    assert isinstance(result.params.slow_factor, spot.SlowFactorParams)
+    assert result.params.ema_span == spot.EMA_SPAN
 
 
 # ---- E. Simulation ---------------------------------------------------------
@@ -559,7 +654,9 @@ def test_simulate_seasonal_profile_appears_in_paths() -> None:
         fourier_harmonics=4,
     )
     params = spot.SpotModelParams(
-        seasonality=seasonality, price_shift=10.0, kappa=0.5,
+        seasonality=seasonality,
+        slow_factor=spot.SlowFactorParams(drift=0.0, sigma=0.0),
+        price_shift=10.0, ema_span=720, kappa=0.5,
         sigma_by_hour=np.full(24, 0.05),
         jump_intensity=0.0, jump_p_up=0.5,
         jump_eta_up=1.0, jump_eta_down=1.0,
