@@ -167,8 +167,43 @@ def _seasonal_design_matrix(
     timestamps: pd.DatetimeIndex,
     harmonics: int = FOURIER_HARMONICS,
 ) -> pd.DataFrame:
-    """Build the OLS design matrix for f(t)."""
-    raise NotImplementedError
+    """Build the OLS design matrix for f(t).
+
+    Columns, in this fixed order so the coefficient vector can be sliced
+    back into a :class:`Seasonality`:
+
+    1. ``intercept`` (constant 1).
+    2. ``2 * harmonics`` Fourier columns ``cos_k`` / ``sin_k`` for
+       ``k = 1..harmonics`` using ``angle = 2π · day_of_year / 365.25``.
+    3. Six day-of-week dummies ``dow_1..dow_6`` (Monday = 0 is the
+       omitted reference).
+    4. Twenty-three hour-of-day dummies ``hod_1..hod_23`` (hour 0 UTC
+       is the omitted reference).
+
+    ``timestamps`` must be tz-aware; UTC is assumed for the hour-of-day
+    bucketing so DST does not bleed into the seasonal coefficients.
+    """
+    if timestamps.tz is None:
+        raise ValueError("timestamps must be tz-aware (expected UTC)")
+
+    n = len(timestamps)
+    cols: dict[str, np.ndarray] = {"intercept": np.ones(n)}
+
+    doy = np.asarray(timestamps.dayofyear, dtype=float)
+    angle = 2.0 * np.pi * doy / 365.25
+    for k in range(1, harmonics + 1):
+        cols[f"cos_{k}"] = np.cos(k * angle)
+        cols[f"sin_{k}"] = np.sin(k * angle)
+
+    dow = np.asarray(timestamps.dayofweek)
+    for d in range(1, 7):  # Monday = 0 is the reference
+        cols[f"dow_{d}"] = (dow == d).astype(float)
+
+    hod = np.asarray(timestamps.hour)
+    for h in range(1, 24):  # hour 0 UTC is the reference
+        cols[f"hod_{h}"] = (hod == h).astype(float)
+
+    return pd.DataFrame(cols, index=timestamps)
 
 
 def _fit_seasonality(
@@ -176,7 +211,32 @@ def _fit_seasonality(
     harmonics: int = FOURIER_HARMONICS,
 ) -> tuple[Seasonality, pd.Series]:
     """Solve the OLS problem and return (Seasonality, fitted f̂(t))."""
-    raise NotImplementedError
+    X = _seasonal_design_matrix(log_prices.index, harmonics)
+    y = log_prices.to_numpy(dtype=float)
+    beta, *_ = np.linalg.lstsq(X.to_numpy(), y, rcond=None)
+
+    cursor = 0
+    intercept = float(beta[cursor]); cursor += 1
+    fourier_coefs = np.asarray(beta[cursor:cursor + 2 * harmonics]).copy()
+    cursor += 2 * harmonics
+    dow_coefs = np.asarray(beta[cursor:cursor + 6]).copy(); cursor += 6
+    hod_coefs = np.asarray(beta[cursor:cursor + 23]).copy(); cursor += 23
+    if cursor != len(beta):
+        raise RuntimeError(
+            f"Design matrix has {len(beta)} cols but slicing consumed {cursor}"
+        )
+
+    seasonality = Seasonality(
+        intercept=intercept,
+        fourier_coefs=fourier_coefs,
+        dow_coefs=dow_coefs,
+        hod_coefs=hod_coefs,
+        fourier_harmonics=harmonics,
+    )
+    fitted = pd.Series(
+        X.to_numpy() @ beta, index=log_prices.index, name="seasonal_fitted",
+    )
+    return seasonality, fitted
 
 
 def _seasonal_predict(
@@ -184,7 +244,16 @@ def _seasonal_predict(
     timestamps: pd.DatetimeIndex,
 ) -> pd.Series:
     """Evaluate f̂(t) on a given timestamp index."""
-    raise NotImplementedError
+    X = _seasonal_design_matrix(timestamps, seasonality.fourier_harmonics)
+    beta = np.concatenate([
+        np.array([seasonality.intercept]),
+        seasonality.fourier_coefs,
+        seasonality.dow_coefs,
+        seasonality.hod_coefs,
+    ])
+    return pd.Series(
+        X.to_numpy() @ beta, index=timestamps, name="seasonal_predicted",
+    )
 
 
 def _detect_jumps(
