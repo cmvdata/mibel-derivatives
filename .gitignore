@@ -66,5 +66,8 @@ desktop.ini
 # Local audit/dump tooling (not part of the product)
 code_bundle.txt
 
+# External data drops kept on disk for cross-checking, not redistributed
+mibel_datasets_2019_2024/
+
 # Reference PDFs (papers etc.) kept locally for audit, not redistributed
 reports/*.pdf
