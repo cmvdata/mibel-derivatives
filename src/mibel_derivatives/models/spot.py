@@ -263,10 +263,37 @@ def _detect_jumps(
 ) -> pd.Series:
     """Iterative threshold jump detector with σ updated by hour-of-day.
 
-    Returns a boolean ``Series`` aligned with ``residual_returns`` whose
-    True entries correspond to flagged jumps.
+    At each iteration the per-hour mean μ_h and standard deviation σ_h
+    are computed from the currently un-flagged residual returns; a return
+    is flagged when ``|ΔZ_t − μ_{h(t)}| > k · σ_{h(t)}``. Iteration stops
+    when the flagged set stabilises or ``max_iter`` is reached. Hours
+    with fewer than five non-jump observations are skipped (no jumps
+    declared for that bucket on this iteration).
     """
-    raise NotImplementedError
+    if residual_returns.index.tz is None:
+        raise ValueError("residual_returns must be UTC-tz-aware")
+
+    hours = np.asarray(residual_returns.index.hour)
+    values = residual_returns.to_numpy(dtype=float)
+    is_jump = np.zeros(len(values), dtype=bool)
+
+    for _ in range(max_iter):
+        new_is_jump = np.zeros_like(is_jump)
+        for h in range(24):
+            mask_h = hours == h
+            mask_h_nonjump = mask_h & ~is_jump
+            if int(mask_h_nonjump.sum()) < 5:
+                continue
+            mu_h = float(values[mask_h_nonjump].mean())
+            sd_h = float(values[mask_h_nonjump].std(ddof=1))
+            if sd_h <= 0.0 or not np.isfinite(sd_h):
+                continue
+            new_is_jump[mask_h] = np.abs(values[mask_h] - mu_h) > k * sd_h
+        if np.array_equal(new_is_jump, is_jump):
+            break
+        is_jump = new_is_jump
+
+    return pd.Series(is_jump, index=residual_returns.index, name="is_jump")
 
 
 def _mle_ou(

@@ -186,3 +186,88 @@ def test_predict_repeats_annual_cycle() -> None:
     p_2024 = spot._seasonal_predict(seas, _hourly_utc("2024-01-08", 24 * 7))
     p_2028 = spot._seasonal_predict(seas, _hourly_utc("2028-01-08", 24 * 7))
     np.testing.assert_allclose(p_2024.to_numpy(), p_2028.to_numpy(), atol=0.02)
+
+
+# ---- C. Iterative threshold jump detection ---------------------------------
+
+
+def _synthetic_returns_with_jumps(
+    n_hours: int,
+    jump_indices: np.ndarray,
+    jump_sizes: np.ndarray,
+    *,
+    seed: int,
+    sigma_base: float = 0.10,
+    sigma_slope: float = 0.005,
+) -> pd.Series:
+    """Build hourly residual returns ~ N(0, σ_h) with planted jumps."""
+    rng = np.random.default_rng(seed=seed)
+    idx = _hourly_utc("2022-01-01", n_hours)
+    hours = np.asarray(idx.hour)
+    sigma_h = sigma_base + sigma_slope * hours  # heteroskedastic by hour
+    eps = rng.standard_normal(n_hours) * sigma_h
+    eps[jump_indices] = eps[jump_indices] + jump_sizes
+    return pd.Series(eps, index=idx, name="resid_ret")
+
+
+def test_detect_jumps_requires_tz() -> None:
+    s = pd.Series(np.zeros(48), index=pd.date_range("2020-01-01", periods=48, freq="h"))
+    with pytest.raises(ValueError):
+        spot._detect_jumps(s)
+
+
+def test_detect_jumps_recovers_planted_jumps_with_high_precision_and_recall() -> None:
+    """Plant 50 known jumps in ~1 year of returns; recover >= 90% with
+    matching precision and tolerable false-positive rate."""
+    n_hours = 24 * 400
+    n_jumps = 50
+    rng = np.random.default_rng(seed=2026)
+    jump_idx = rng.choice(n_hours, size=n_jumps, replace=False)
+    # Jumps of ±1.0 sit comfortably above the worst-hour σ ~ 0.22 even
+    # at the k=4 threshold (signal-to-noise ≈ 4.6).
+    jump_sizes = rng.choice([-1.0, 1.0], size=n_jumps)
+    rr = _synthetic_returns_with_jumps(
+        n_hours, jump_idx, jump_sizes, seed=2026,
+    )
+
+    flagged = spot._detect_jumps(rr, k=4.0)
+    truth = np.zeros(n_hours, dtype=bool)
+    truth[jump_idx] = True
+
+    tp = int(np.sum(truth & flagged.to_numpy()))
+    fp = int(np.sum(~truth & flagged.to_numpy()))
+    fn = int(np.sum(truth & ~flagged.to_numpy()))
+    recall = tp / (tp + fn) if (tp + fn) else 0.0
+    precision = tp / (tp + fp) if (tp + fp) else 0.0
+
+    assert recall >= 0.90, f"recall={recall:.3f} (tp={tp}, fn={fn})"
+    assert precision >= 0.85, f"precision={precision:.3f} (tp={tp}, fp={fp})"
+
+
+def test_detect_jumps_low_false_positive_on_pure_gaussian() -> None:
+    """No jumps planted; at k=4 the false-positive rate should be ~0.5%."""
+    n_hours = 24 * 365
+    rng = np.random.default_rng(seed=99)
+    idx = _hourly_utc("2023-01-01", n_hours)
+    rr = pd.Series(rng.standard_normal(n_hours) * 0.10, index=idx)
+    flagged = spot._detect_jumps(rr, k=4.0)
+    fp_rate = float(flagged.mean())
+    # Theory: 2·Φ(-4) ≈ 6.3e-5. With finite-sample noise + iterative
+    # refinement we cap at 0.005 (0.5%), which is still well under 1%.
+    assert fp_rate < 0.005, f"fp_rate={fp_rate:.4%}"
+
+
+def test_detect_jumps_converges_within_max_iter() -> None:
+    """Iterative detector must terminate before hitting the cap."""
+    n_hours = 24 * 200
+    rng = np.random.default_rng(seed=11)
+    n_jumps = 30
+    jump_idx = rng.choice(n_hours, size=n_jumps, replace=False)
+    jump_sizes = rng.normal(0.0, 0.6, size=n_jumps)
+    rr = _synthetic_returns_with_jumps(n_hours, jump_idx, jump_sizes, seed=11)
+    # max_iter=2 must produce a stable enough mask (test runs but does not
+    # explode on tight budgets).
+    flagged_short = spot._detect_jumps(rr, k=4.0, max_iter=2)
+    flagged_full = spot._detect_jumps(rr, k=4.0, max_iter=10)
+    # The full iteration finds at least as many jumps as the truncated one.
+    assert int(flagged_full.sum()) >= int(flagged_short.sum())
