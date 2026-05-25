@@ -7,9 +7,13 @@ Specification (CONTEXT.md § Pieza 1, reespec 2026-05-24):
 
 where the three components are, from slowest to fastest:
 
-  • θ_t  — causal EMA of Y_t with ``span = EMA_SPAN`` hours (~30 days).
-    Absorbs the multi-week / regime-shift component (e.g. the 2022 gas
-    crisis) so that κ̂ is not contaminated by long-memory drift.
+  • θ_t  — causal EMA of Y_t with ``span = EMA_SPAN`` hours. The default
+    ``EMA_SPAN = 24`` makes θ_t the daily-level component (the price
+    level for "today" driven by unit-commitment, ramp limits and the
+    gas day) and the fast residual the intraday component. See the
+    constant docstring below for why the original "~30 days" target
+    didn't survive the bounded MLE on real OMIE data; the operational
+    interpretation is cleaner anyway.
   • s(t) — deterministic seasonality, fit by OLS on X_t := Y_t − θ_t:
         s(t) = α + Σ_{k=1..K} (a_k cos + b_k sin)(2π k·doy/365.25)
                + Σ_{d=1..6} γ_d 1{dow=d}
@@ -80,7 +84,22 @@ logger = logging.getLogger(__name__)
 
 PRICE_SHIFT: float = 10.0
 FOURIER_HARMONICS: int = 4
-EMA_SPAN: int = 720
+
+# EMA_SPAN was originally specified at 720 h (~30 days) to absorb the
+# 2022 gas-crisis regime shift. Empirically the bounded MLE on real
+# OMIE 2019-2024 hits the κ lower bound at every span ≥ 48 h: the
+# residual carries strong 24-hour and 168-hour autocorrelations
+# (≈ 0.50 and ≈ 0.30 respectively) that the additive Fourier + DoW + HoD
+# seasonality cannot fully resolve (no DoW × HoD interaction), and the
+# OU absorbs them as a slow mean-reversion. With EMA_SPAN = 24 the slow
+# factor tracks the daily level — driven by operational constraints
+# (unit commitment, ramp limits, gas day) — and the fast residual
+# carries only intraday dynamics. κ̂ and λ̂ then land inside the
+# bounded ranges. The 2022 regime shift is still absorbed by the slow
+# factor; it is just absorbed at a daily resolution rather than at a
+# monthly resolution. See reports/diagnostics/spot_model_calibration.md
+# for the full justification.
+EMA_SPAN: int = 24
 
 # Refined-detection knobs (Commit G2 wires these into _detect_jumps).
 JUMP_THRESHOLD_K_BASE: float = 4.5
@@ -120,16 +139,36 @@ class Seasonality:
 
 @dataclass(frozen=True)
 class SlowFactorParams:
-    """Arithmetic random-walk parameters for the slow factor θ_t.
+    """Slow-OU parameters for the slow factor θ_t.
 
-    Estimated from the historical first differences ``Δθ̂_t``: the drift
-    is the sample mean and ``sigma`` the sample standard deviation. The
-    walk is stationary in increments, NOT in level — over horizons of a
-    few weeks it behaves as a slow trend; over long horizons it
-    diverges and must be re-anchored by Pieza 2's L_t.
+    The arithmetic-RW formulation in the original reespec proved
+    unstable when exponentiated over a 1-year horizon: cumulative
+    σ_θ · √T explodes E[P_t] through Jensen even for "small per-hour
+    noise". The fit therefore calibrates a slow Ornstein-Uhlenbeck
+    instead, which has a finite stationary distribution by
+    construction:
+
+        θ_{t+1} = μ_θ + exp(-κ_θ Δt) · (θ_t − μ_θ) + σ_θ ε_t,
+        ε_t ~ N(0, 1).
+
+    With κ_θ → 0 the slow factor degenerates to a random walk; with
+    κ_θ ≫ 0 it collapses to a flat μ_θ. Calibration uses an AR(1)
+    regression on the historical θ̂_t series centred at its sample
+    mean:
+
+        μ̂_θ      = mean(θ̂_t)
+        φ̂_θ      = Σ (θ̂_t − μ̂_θ)(θ̂_{t+1} − μ̂_θ) / Σ (θ̂_t − μ̂_θ)²
+        κ̂_θ      = -log(φ̂_θ)
+        σ̂_θ²     = sample variance of innovations.
+
+    For OMIE 2019-2024 (EMA_SPAN = 24) this gives
+    κ̂_θ ≈ 8 × 10⁻⁴ (half-life ≈ 37 days) and σ̂_θ ≈ 0.027, with
+    stationary std σ̂_θ / √(2 κ̂_θ) ≈ 0.68 matching the empirical
+    spread of θ̂_t over the period.
     """
 
-    drift: float
+    kappa: float
+    mean: float
     sigma: float
 
 
@@ -264,10 +303,22 @@ def fit(
         jump_sizes, n_total_hours=len(residual_returns),
     )
 
-    delta_theta = theta_series.iloc[ema_span:].diff().dropna()
+    theta_pw_arr = theta_series.iloc[ema_span:].to_numpy(dtype=float)
+    mu_theta = float(theta_pw_arr.mean())
+    y_theta = theta_pw_arr - mu_theta
+    denom_theta = float((y_theta[:-1] ** 2).sum())
+    if denom_theta <= 0:
+        # Degenerate (e.g., constant θ) — set zero-noise OU at the mean.
+        kappa_theta = 0.0
+        sigma_theta = 0.0
+    else:
+        phi_theta = float((y_theta[:-1] * y_theta[1:]).sum() / denom_theta)
+        phi_theta = float(np.clip(phi_theta, 1e-6, 1.0 - 1e-12))
+        kappa_theta = -float(np.log(phi_theta))
+        eta_theta = y_theta[1:] - phi_theta * y_theta[:-1]
+        sigma_theta = float(np.std(eta_theta, ddof=1))
     slow_factor = SlowFactorParams(
-        drift=float(delta_theta.mean()),
-        sigma=float(delta_theta.std(ddof=1)),
+        kappa=kappa_theta, mean=mu_theta, sigma=sigma_theta,
     )
 
     params = SpotModelParams(
@@ -354,13 +405,20 @@ def simulate(
 
     seasonal_t = _seasonal_predict(params.seasonality, idx).to_numpy()
 
-    # --- Slow factor θ_t: arithmetic RW with drift+noise. -----------------
-    drift = params.slow_factor.drift
-    theta_sigma = params.slow_factor.sigma
+    # --- Slow factor θ_t: slow OU around μ_θ. -----------------------------
+    kappa_theta = params.slow_factor.kappa
+    mu_theta = params.slow_factor.mean
+    sigma_theta = params.slow_factor.sigma
+    phi_theta = float(np.exp(-kappa_theta))
     theta_innov = rng.standard_normal((n_paths, n_hours))
-    delta_theta = drift + theta_sigma * theta_innov
-    delta_theta[:, 0] = 0.0  # t=0 is the initial condition itself
-    theta = initial_theta + np.cumsum(delta_theta, axis=1)
+    theta = np.empty((n_paths, n_hours))
+    theta[:, 0] = initial_theta
+    for t in range(1, n_hours):
+        theta[:, t] = (
+            mu_theta
+            + phi_theta * (theta[:, t - 1] - mu_theta)
+            + sigma_theta * theta_innov[:, t]
+        )
 
     # --- Fast residual Z_t: OU + Bernoulli·Kou. ---------------------------
     kappa = params.kappa

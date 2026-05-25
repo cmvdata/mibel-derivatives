@@ -30,7 +30,7 @@ def test_module_exposes_public_api() -> None:
         assert hasattr(spot, name), f"spot.{name} missing"
     assert spot.PRICE_SHIFT == 10.0
     assert spot.FOURIER_HARMONICS == 4
-    assert spot.EMA_SPAN == 720
+    assert spot.EMA_SPAN == 24
     assert spot.JUMP_THRESHOLD_K_BASE == 4.5
     assert spot.JUMP_THRESHOLD_K_PEAK == 6.0
     assert spot.JUMP_AMPLITUDE_MIN == 0.30
@@ -65,7 +65,7 @@ def test_params_dataclass_is_frozen_and_constructs() -> None:
         hod_coefs=np.zeros(23),
         fourier_harmonics=4,
     )
-    slow = spot.SlowFactorParams(drift=0.0, sigma=0.001)
+    slow = spot.SlowFactorParams(kappa=0.001, mean=0.0, sigma=0.001)
     params = spot.SpotModelParams(
         seasonality=seasonality,
         slow_factor=slow,
@@ -92,7 +92,8 @@ def _trivial_params(**overrides) -> spot.SpotModelParams:
         fourier_harmonics=4,
     )
     slow = spot.SlowFactorParams(
-        drift=overrides.get("slow_drift", 0.0),
+        kappa=overrides.get("slow_kappa", 0.0),
+        mean=overrides.get("slow_mean", 0.0),
         sigma=overrides.get("slow_sigma", 0.0),
     )
     return spot.SpotModelParams(
@@ -248,7 +249,10 @@ def test_fit_slow_factor_absorbs_planted_trend() -> None:
     theta_pw = result.theta_series.iloc[result.params.ema_span:]
     n_pw = len(theta_pw)
     assert theta_pw.iloc[-n_pw // 4:].mean() > theta_pw.iloc[: n_pw // 4].mean() + 0.5
-    assert result.params.slow_factor.drift > 1e-5
+    # Slow OU collapses to phi_θ near 1 on a trended series (no
+    # mean-reversion within the window); sigma_θ stays finite.
+    assert np.exp(-result.params.slow_factor.kappa) > 0.99
+    assert result.params.slow_factor.sigma > 0.0
     assert abs(result.params.seasonality.intercept) < 0.10
     # κ̂ inside bounds (would have raised otherwise).
     assert spot.KAPPA_BOUNDS[0] <= result.params.kappa <= spot.KAPPA_BOUNDS[1]
@@ -646,7 +650,11 @@ def test_fit_end_to_end_recovers_seasonal_and_ou_under_slow_fast() -> None:
     log_p = seasonal + z
     prices = pd.Series(np.exp(log_p) - 10.0, index=idx, name="price_eur_mwh")
 
-    result = spot.fit(prices)
+    # Use the original ~30-day EMA span here: the synthetic has no slow
+    # factor, only seasonal+OU+jumps, so the long EMA acts as a near-flat
+    # baseline that preserves the OU memory we want fit() to recover.
+    # The library default EMA_SPAN=24 is tuned for real OMIE 2019-2024.
+    result = spot.fit(prices, ema_span=720)
     p = result.params
 
     # θ̂_t absorbs the level PLUS the non-zero means of the dummy blocks
@@ -690,8 +698,9 @@ def test_fit_end_to_end_recovers_seasonal_and_ou_under_slow_fast() -> None:
     assert spot.ETA_BOUNDS[0] <= p.jump_eta_down <= spot.ETA_BOUNDS[1]
     assert spot.KAPPA_BOUNDS[0] <= p.kappa <= spot.KAPPA_BOUNDS[1]
     # Slow factor RW params: drift ≈ 0, sigma small (since no trend planted).
-    assert abs(p.slow_factor.drift) < 1e-4
-    assert p.slow_factor.sigma < 0.005
+    # Slow OU should be near-degenerate on this synthetic (no slow trend
+    # planted): σ_θ small. κ_θ is unconstrained, can be anything.
+    assert p.slow_factor.sigma < 0.05
     # n_obs is full input; residuals are post-warmup.
     assert result.n_obs == n_hours
     assert len(result.residuals) == n_hours - p.ema_span
@@ -777,30 +786,27 @@ def test_simulate_jumps_increase_dispersion() -> None:
     assert float(b.std()) > float(a.std())
 
 
-def test_simulate_slow_factor_drift_shifts_long_horizon_mean() -> None:
-    """With drift > 0 and noise = 0, θ_t marches linearly upward; the
-    long-horizon mean price must climb above the no-drift baseline."""
+def test_simulate_slow_factor_mean_attracts_path() -> None:
+    """Slow-OU on θ_t with μ_θ ≠ initial_theta: paths drift toward μ_θ
+    over long horizons. Compare to the κ_θ=0 (no mean reversion) case."""
     start = pd.Timestamp("2025-01-01", tz="UTC")
-    p_flat = _trivial_params(slow_drift=0.0, slow_sigma=0.0, jump_intensity=0.0)
-    p_drift = _trivial_params(
-        slow_drift=5e-5,  # +0.05 in log over ~1000 h, +0.44 over a year
-        slow_sigma=0.0,
-        jump_intensity=0.0,
-    )
-    flat = spot.simulate(p_flat, start, 24 * 365, 50, seed=42)
-    drifting = spot.simulate(p_drift, start, 24 * 365, 50, seed=42)
-    # Mean of the drifting run is meaningfully higher than the flat run.
-    assert drifting.mean() > flat.mean() + 5.0
+    p_flat = _trivial_params(slow_kappa=0.0, slow_mean=0.0, slow_sigma=0.0,
+                              jump_intensity=0.0)
+    p_pull = _trivial_params(slow_kappa=0.001, slow_mean=1.0, slow_sigma=0.0,
+                              jump_intensity=0.0)
+    flat = spot.simulate(p_flat, start, 24 * 365, 50, initial_theta=0.0, seed=42)
+    pulled = spot.simulate(p_pull, start, 24 * 365, 50, initial_theta=0.0, seed=42)
+    assert pulled.mean() > flat.mean() + 5.0
 
 
 def test_simulate_slow_factor_noise_inflates_long_horizon_dispersion() -> None:
-    """drift = 0, sigma > 0 → θ_t is a zero-drift RW that adds variance
-    over long horizons; price dispersion must grow vs the flat case."""
+    """σ_θ > 0 inflates price dispersion over a year vs the σ_θ = 0 case
+    at the same κ_θ."""
     start = pd.Timestamp("2025-01-01", tz="UTC")
-    p_flat = _trivial_params(slow_drift=0.0, slow_sigma=0.0, jump_intensity=0.0)
-    # σ_θ = 0.004 contributes ~0.004·√8760 ≈ 0.37 to the cumulative log-std
-    # over the year, vs ~0.22 from the OU. Combined std multiplier ≈ 1.9.
-    p_noisy = _trivial_params(slow_drift=0.0, slow_sigma=0.004, jump_intensity=0.0)
+    p_flat = _trivial_params(slow_kappa=0.001, slow_mean=0.0, slow_sigma=0.0,
+                              jump_intensity=0.0)
+    p_noisy = _trivial_params(slow_kappa=0.001, slow_mean=0.0, slow_sigma=0.02,
+                               jump_intensity=0.0)
     flat = spot.simulate(p_flat, start, 24 * 365, 100, seed=7)
     noisy = spot.simulate(p_noisy, start, 24 * 365, 100, seed=7)
     assert float(noisy.std()) > 1.5 * float(flat.std())
@@ -834,7 +840,7 @@ def test_simulate_seasonal_profile_appears_in_paths() -> None:
     )
     params = spot.SpotModelParams(
         seasonality=seasonality,
-        slow_factor=spot.SlowFactorParams(drift=0.0, sigma=0.0),
+        slow_factor=spot.SlowFactorParams(kappa=0.0, mean=0.0, sigma=0.0),
         price_shift=10.0, ema_span=720, kappa=0.5,
         sigma_by_hour=np.full(24, 0.05),
         jump_intensity=0.0, jump_p_up=0.5,
