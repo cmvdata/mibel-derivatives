@@ -74,6 +74,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
+from scipy.optimize import minimize
 
 logger = logging.getLogger(__name__)
 
@@ -524,28 +525,28 @@ def _mle_ou(
     residuals: pd.Series,
     jump_mask: pd.Series,
     dt_hours: float = 1.0,
+    *,
+    kappa_bounds: tuple[float, float] = KAPPA_BOUNDS,
+    sigma_lower: float = SIGMA_LOWER_BOUND,
 ) -> tuple[float, np.ndarray]:
-    """Closed-form MLE for the OU process on non-jump observations.
+    """Bounded MLE for the OU process on non-jump observations.
 
-    The OU SDE ``dZ_t = -κ Z_t dt + σ_h(t) dW_t`` discretised at one-hour
-    intervals is an AR(1) through the origin,
+    Optimises the discrete AR(1) Gaussian log-likelihood over
+    ``(κ, σ_0, σ_1, …, σ_23)`` with ``scipy.optimize.minimize(method=
+    'L-BFGS-B')`` and the project bounds (``KAPPA_BOUNDS`` on κ,
+    ``[sigma_lower, +∞)`` on each σ_h).
 
-        Z_{t+1} = φ · Z_t + η_t,    φ = exp(-κ Δt),
-        Var(η_t) = σ_{h(t+1)}^2 · (1 - φ^2) / (2 κ).
+    Per-observation density:
 
-    The estimator is two-step:
+        Z_{t+1} | Z_t  ~  N(φ Z_t, σ_{h(t+1)}^2 · (1 − φ^2) / (2 κ)),
+        φ = exp(-κ · dt_hours).
 
-    * ``φ̂ = Σ Z_t Z_{t+1} / Σ Z_t^2`` over pairs whose return was NOT
-      flagged as a jump, then ``κ̂ = -log φ̂ / Δt`` (clipped into a
-      numerically safe interior of (0, 1) before the log).
-    * Innovations ``η̂_t = Z_{t+1} − φ̂ Z_t`` are bucketed by the
-      destination hour-of-day; per-hour variance is inverted into the
-      instantaneous σ via ``σ_h^2 = Var(η̂)_h · 2 κ̂ / (1 − φ̂^2)``.
-      Hours with fewer than five non-jump pairs are filled with the
-      cross-hour median.
-
-    ``jump_mask`` is aligned with the returns index (``residuals.index[1:]``)
-    so its length must be ``len(residuals) - 1``.
+    A closed-form AR(1) estimate of (κ, σ_h) is used as the warm start
+    (clipped into the bounds). The function raises ``RuntimeError`` if
+    the optimiser does not converge OR if κ̂ touches either of its
+    bounds within tolerance 1e-3, with the bound-active path naming
+    which side was hit so the caller can decide whether to widen the
+    bound or re-examine the slow-factor extraction.
     """
     z = residuals.to_numpy(dtype=float)
     if len(z) < 24:
@@ -560,56 +561,170 @@ def _mle_ou(
     nonjump = ~jump_mask.to_numpy()
     z_t_nj = z_t[nonjump]
     z_tp1_nj = z_tp1[nonjump]
+    hours_nj = np.asarray(residuals.index[1:].hour)[nonjump]
 
+    # Warm start: closed-form AR(1) clipped into bounds.
     denom = float((z_t_nj * z_t_nj).sum())
     if denom <= 0:
         raise ValueError("Degenerate residual series (zero variance)")
-    phi = float((z_t_nj * z_tp1_nj).sum() / denom)
-    phi = float(np.clip(phi, 1e-6, 1.0 - 1e-6))
-    kappa = -np.log(phi) / dt_hours
-
-    eta = z_tp1_nj - phi * z_t_nj
-    factor = (2.0 * kappa) / (1.0 - phi**2)
-    hours_nj = np.asarray(residuals.index[1:].hour)[nonjump]
-    sigma_by_hour = np.full(24, np.nan)
+    phi0_raw = float((z_t_nj * z_tp1_nj).sum() / denom)
+    phi0 = float(np.clip(
+        phi0_raw,
+        np.exp(-kappa_bounds[1] * dt_hours),
+        np.exp(-kappa_bounds[0] * dt_hours),
+    ))
+    kappa0 = -np.log(phi0) / dt_hours
+    eta0 = z_tp1_nj - phi0 * z_t_nj
+    factor0 = (2.0 * kappa0) / (1.0 - phi0**2)
+    sigma0 = np.full(24, np.nan)
     for h in range(24):
-        eta_h = eta[hours_nj == h]
-        if len(eta_h) < 5:
-            continue
-        sigma_by_hour[h] = np.sqrt(float(eta_h.var(ddof=1)) * factor)
-    overall = float(np.nanmedian(sigma_by_hour))
-    sigma_by_hour = np.where(np.isnan(sigma_by_hour), overall, sigma_by_hour)
-    return kappa, sigma_by_hour
+        eh = eta0[hours_nj == h]
+        if len(eh) >= 5:
+            sigma0[h] = np.sqrt(float(eh.var(ddof=1)) * factor0)
+    overall = float(np.nanmedian(sigma0))
+    sigma0 = np.where(np.isnan(sigma0), overall, sigma0)
+    sigma0 = np.clip(sigma0, sigma_lower * 1.1, None)
+
+    bounds = [kappa_bounds] + [(sigma_lower, None)] * 24
+    x0 = np.concatenate([[kappa0], sigma0])
+
+    diff_innov = z_tp1_nj - 0.0  # placeholder; computed inside neg_log_lik
+
+    def neg_log_lik(x: np.ndarray) -> float:
+        kappa = x[0]
+        sigma_h = x[1:]
+        phi = float(np.exp(-kappa * dt_hours))
+        sig2 = sigma_h**2 * (1.0 - phi**2) / (2.0 * kappa)
+        sig2_obs = sig2[hours_nj]
+        innov = z_tp1_nj - phi * z_t_nj
+        return float(
+            0.5 * np.sum(np.log(2.0 * np.pi * sig2_obs) + innov**2 / sig2_obs)
+        )
+
+    result = minimize(neg_log_lik, x0, method="L-BFGS-B", bounds=bounds)
+    if not result.success:
+        raise RuntimeError(f"OU MLE did not converge: {result.message}")
+
+    kappa_hat = float(result.x[0])
+    sigma_hat = np.asarray(result.x[1:], dtype=float)
+
+    tol = 1e-3
+    lo, hi = kappa_bounds
+    if abs(kappa_hat - lo) < tol:
+        raise RuntimeError(
+            f"OU MLE: kappa_hat={kappa_hat:.6f} hit lower bound {lo}. "
+            "Series may have memory longer than the bound allows; "
+            "check the slow-factor extraction (EMA_SPAN) or widen "
+            "KAPPA_BOUNDS."
+        )
+    if abs(kappa_hat - hi) < tol:
+        raise RuntimeError(
+            f"OU MLE: kappa_hat={kappa_hat:.6f} hit upper bound {hi}. "
+            "Series mean-reverts faster than the bound allows; widen "
+            "KAPPA_BOUNDS."
+        )
+    return kappa_hat, sigma_hat
 
 
 def _mle_jumps(
     jump_returns: pd.Series,
     n_total_hours: int,
+    *,
+    lambda_bounds: tuple[float, float] = LAMBDA_BOUNDS,
+    eta_bounds: tuple[float, float] = ETA_BOUNDS,
+    p_up_bounds: tuple[float, float] = P_UP_BOUNDS,
 ) -> tuple[float, float, float, float]:
-    """MLE for the Poisson rate and Kou (2002) asymmetric double-exponential.
+    """Bounded MLE for the Poisson rate + Kou asymmetric double-exponential.
 
-    Closed-form moment estimators:
+    Joint optimisation over ``(λ, p_up, η_up, η_down)`` of the
+    Poisson-times-Kou log-likelihood
 
-        λ̂      = #jumps / n_total_hours
-        p̂_up   = #(J > 0) / #jumps
-        η̂_up   = 1 / mean(J | J > 0)
-        η̂_down = 1 / mean(-J | J < 0)
+        log L = n_jumps · log λ − λ · n_total_hours
+              + n_up   · log(p_up · η_up)     − η_up   · Σ J_up
+              + n_down · log((1−p_up)·η_down) − η_down · Σ |J_down|
 
-    When a side is empty (all jumps share the same sign), the missing
-    rate is set to 1.0 as a neutral default and the side probability
-    truncates accordingly.
+    via ``scipy.optimize.minimize(method='L-BFGS-B')`` with the project
+    bounds (LAMBDA_BOUNDS on λ, ETA_BOUNDS on both η, P_UP_BOUNDS on
+    p_up). Raises ``RuntimeError`` on non-convergence OR if any of
+    λ, η_up, η_down touches a bound within tolerance 1e-3 (p_up is
+    informational only — hitting its bounds means a one-sided sample,
+    which is realistic).
+
+    When no jumps were detected, returns the lower bound for λ and
+    neutral defaults for the Kou parameters (η = 1.0, p_up = 0.5);
+    the caller may want to treat this as a degenerate calibration.
     """
     if n_total_hours <= 0:
         raise ValueError("n_total_hours must be positive")
     n_jumps = len(jump_returns)
-    intensity = n_jumps / n_total_hours
     if n_jumps == 0:
-        return intensity, 0.5, 1.0, 1.0
+        return lambda_bounds[0], 0.5, 1.0, 1.0
 
     j = jump_returns.to_numpy(dtype=float)
     j_up = j[j > 0]
     j_down = j[j < 0]
-    p_up = float(len(j_up)) / float(n_jumps)
-    eta_up = float(1.0 / j_up.mean()) if len(j_up) >= 1 else 1.0
-    eta_down = float(1.0 / (-j_down.mean())) if len(j_down) >= 1 else 1.0
-    return intensity, p_up, eta_up, eta_down
+    n_up = int(len(j_up))
+    n_down = int(len(j_down))
+    sum_up = float(j_up.sum())
+    sum_down_abs = float((-j_down).sum())
+
+    # Warm start (clipped into bounds, interior margin 1e-3 to avoid
+    # starting AT a bound which can keep L-BFGS-B pinned).
+    margin = 1e-3
+    lam0 = float(np.clip(
+        n_jumps / n_total_hours,
+        lambda_bounds[0] + margin, lambda_bounds[1] - margin,
+    ))
+    p_up0 = float(np.clip(
+        n_up / n_jumps,
+        p_up_bounds[0] + margin, p_up_bounds[1] - margin,
+    ))
+    eta_up0 = (
+        float(np.clip(
+            1.0 / (sum_up / max(n_up, 1)),
+            eta_bounds[0] + margin, eta_bounds[1] - margin,
+        ))
+        if n_up >= 1 else (eta_bounds[0] + eta_bounds[1]) / 2.0
+    )
+    eta_down0 = (
+        float(np.clip(
+            1.0 / (sum_down_abs / max(n_down, 1)),
+            eta_bounds[0] + margin, eta_bounds[1] - margin,
+        ))
+        if n_down >= 1 else (eta_bounds[0] + eta_bounds[1]) / 2.0
+    )
+
+    bounds = [lambda_bounds, p_up_bounds, eta_bounds, eta_bounds]
+    x0 = np.array([lam0, p_up0, eta_up0, eta_down0])
+
+    def neg_log_lik(x: np.ndarray) -> float:
+        lam, p_up, eta_up, eta_down = x
+        ll = n_jumps * np.log(lam) - lam * n_total_hours
+        if n_up >= 1:
+            ll = ll + n_up * np.log(p_up * eta_up) - eta_up * sum_up
+        if n_down >= 1:
+            ll = ll + n_down * np.log((1.0 - p_up) * eta_down) - eta_down * sum_down_abs
+        return -float(ll)
+
+    result = minimize(neg_log_lik, x0, method="L-BFGS-B", bounds=bounds)
+    if not result.success:
+        raise RuntimeError(f"Kou MLE did not converge: {result.message}")
+
+    lam_hat, p_up_hat, eta_up_hat, eta_down_hat = (float(v) for v in result.x)
+    tol = 1e-3
+    for name, val, (lo, hi) in [
+        ("lambda", lam_hat, lambda_bounds),
+        ("eta_up", eta_up_hat, eta_bounds),
+        ("eta_down", eta_down_hat, eta_bounds),
+    ]:
+        if abs(val - lo) < tol:
+            raise RuntimeError(
+                f"Kou MLE: {name}={val:.6f} hit lower bound {lo}; "
+                f"sample is at the edge of the assumed parameter space."
+            )
+        if abs(val - hi) < tol:
+            raise RuntimeError(
+                f"Kou MLE: {name}={val:.6f} hit upper bound {hi}; "
+                f"sample is at the edge of the assumed parameter space."
+            )
+    return lam_hat, p_up_hat, eta_up_hat, eta_down_hat

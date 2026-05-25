@@ -226,22 +226,32 @@ def test_ema_is_causal_no_future_leakage() -> None:
 def test_fit_slow_factor_absorbs_planted_trend() -> None:
     """A linear trend in log-price must be picked up by θ̂_t with a
     positive drift in SlowFactorParams; the seasonal intercept stays
-    around zero."""
+    around zero. The fast residual is a small OU layer with κ inside
+    bounds so the (bounded) MLE doesn't trip its κ upper bound."""
     rng = np.random.default_rng(seed=5)
     n_hours = 24 * 365 * 3
     idx = _hourly_utc("2020-01-01", n_hours)
-    # log-price = 3.5 + 0.0002 * t + noise — a steady upward drift of
-    # 0.0002 per hour ≈ +1.75 in log over 3 years.
-    log_p = 3.5 + 0.0002 * np.arange(n_hours) + 0.05 * rng.standard_normal(n_hours)
+    # Slow trend.
+    trend = 3.5 + 0.0002 * np.arange(n_hours)
+    # Fast OU layer with κ=0.10 (inside [0.05, 0.20]) so the bounded
+    # MLE has a real signal to recover.
+    kappa = 0.10
+    sigma = 0.05
+    phi = float(np.exp(-kappa))
+    factor = float(np.sqrt((1 - phi**2) / (2 * kappa)))
+    z = np.zeros(n_hours)
+    for t in range(1, n_hours):
+        z[t] = phi * z[t - 1] + sigma * factor * rng.standard_normal()
+    log_p = trend + z
     prices = pd.Series(np.exp(log_p) - 10.0, index=idx, name="p")
     result = spot.fit(prices)
     theta_pw = result.theta_series.iloc[result.params.ema_span:]
-    # θ̂_t increases over time (mean later >> mean earlier).
     n_pw = len(theta_pw)
     assert theta_pw.iloc[-n_pw // 4:].mean() > theta_pw.iloc[: n_pw // 4].mean() + 0.5
     assert result.params.slow_factor.drift > 1e-5
-    # Seasonal intercept tiny since trend is in θ_t now.
     assert abs(result.params.seasonality.intercept) < 0.10
+    # κ̂ inside bounds (would have raised otherwise).
+    assert spot.KAPPA_BOUNDS[0] <= result.params.kappa <= spot.KAPPA_BOUNDS[1]
 
 
 def test_predict_repeats_annual_cycle() -> None:
@@ -510,13 +520,14 @@ def test_mle_ou_robust_to_planted_jumps_when_masked() -> None:
 
 
 def test_mle_jumps_recovers_kou_params() -> None:
+    """Recovery with all true parameters STRICTLY inside the bounds."""
     rng = np.random.default_rng(seed=123)
-    n_total = 24 * 365 * 5
-    n_jumps = 250  # 50 jumps/year × 5 years
+    n_total = 24 * 365 * 5  # 5 years hourly
+    n_jumps = 500           # λ_true = 500 / 43800 ≈ 0.0114 (inside [0.008, 0.025])
     true_lambda = n_jumps / n_total
     true_p_up = 0.70
-    true_eta_up = 5.0
-    true_eta_down = 8.0
+    true_eta_up = 2.0       # inside [0.8, 4.0]
+    true_eta_down = 2.5     # inside [0.8, 4.0]
 
     is_up = rng.random(n_jumps) < true_p_up
     mags_up = rng.exponential(1.0 / true_eta_up, size=n_jumps)
@@ -527,19 +538,66 @@ def test_mle_jumps_recovers_kou_params() -> None:
     )
 
     intensity, p_up, eta_up, eta_down = spot._mle_jumps(jumps, n_total)
-    assert abs(intensity - true_lambda) / true_lambda < 0.01
+    assert abs(intensity - true_lambda) / true_lambda < 0.05
     assert abs(p_up - true_p_up) < 0.05
     assert abs(eta_up - true_eta_up) / true_eta_up < 0.15
     assert abs(eta_down - true_eta_down) / true_eta_down < 0.15
 
 
 def test_mle_jumps_handles_empty_input() -> None:
+    """With no detected jumps, λ̂ defaults to the lower bound and Kou
+    params to neutral; the bound-active check is bypassed in this path."""
     intensity, p_up, eta_up, eta_down = spot._mle_jumps(
         pd.Series(dtype=float), n_total_hours=24 * 30,
     )
-    assert intensity == 0.0
+    assert intensity == spot.LAMBDA_BOUNDS[0]
     assert p_up == 0.5
     assert eta_up == 1.0 and eta_down == 1.0
+
+
+def test_mle_jumps_raises_on_lambda_below_bound() -> None:
+    """A sample with rate below LAMBDA_BOUNDS[0] must hit the lower bound
+    and raise RuntimeError rather than silently clip."""
+    rng = np.random.default_rng(seed=10)
+    n_total = 24 * 365 * 5
+    # 30 jumps / 43800 hours = 0.00068 — well below LAMBDA_BOUNDS[0]=0.008
+    sizes = rng.choice([-0.5, 0.5], size=30)
+    jumps = pd.Series(sizes, index=_hourly_utc("2020-01-01", 30))
+    with pytest.raises(RuntimeError, match="lambda"):
+        spot._mle_jumps(jumps, n_total)
+
+
+def test_mle_jumps_raises_on_eta_above_bound() -> None:
+    """A sample of tiny jumps (mean 0.1, η_true=10) hits eta upper bound."""
+    rng = np.random.default_rng(seed=11)
+    n_total = 24 * 365 * 5
+    # 500 jumps with very small sizes — true η ~ 10 (way above ETA_BOUNDS[1]=4)
+    n_jumps = 500
+    is_up = rng.random(n_jumps) < 0.5
+    sizes_up = rng.exponential(0.1, n_jumps)
+    sizes_down = -rng.exponential(0.1, n_jumps)
+    sizes = np.where(is_up, sizes_up, sizes_down)
+    jumps = pd.Series(sizes, index=_hourly_utc("2020-01-01", n_jumps))
+    with pytest.raises(RuntimeError, match="eta"):
+        spot._mle_jumps(jumps, n_total)
+
+
+def test_mle_ou_raises_when_kappa_outside_bounds() -> None:
+    """A series with κ_true=0.005 (below KAPPA_BOUNDS[0]=0.05) must hit
+    the lower bound and raise RuntimeError."""
+    rng = np.random.default_rng(seed=22)
+    n_hours = 24 * 200
+    very_slow_kappa = 0.005
+    sigma_h = np.full(24, 0.10)
+    phi = float(np.exp(-very_slow_kappa))
+    factor = float(np.sqrt((1 - phi**2) / (2 * very_slow_kappa)))
+    z = np.zeros(n_hours)
+    for t in range(1, n_hours):
+        z[t] = phi * z[t - 1] + sigma_h[0] * factor * rng.standard_normal()
+    z_series = pd.Series(z, index=_hourly_utc("2020-01-01", n_hours))
+    jump_mask = pd.Series(False, index=z_series.index[1:])
+    with pytest.raises(RuntimeError, match="kappa"):
+        spot._mle_ou(z_series, jump_mask)
 
 
 def test_fit_end_to_end_recovers_seasonal_and_ou_under_slow_fast() -> None:
@@ -567,11 +625,16 @@ def test_fit_end_to_end_recovers_seasonal_and_ou_under_slow_fast() -> None:
     true_sigma_h = (
         0.08 + 0.06 * np.sin(np.linspace(0, 2 * np.pi, 24, endpoint=False)) ** 2
     )
-    n_jumps_planted = 200
+    # Plant enough jumps so that, after the k=4.5 / amplitude=0.30 floor
+    # culls the small-magnitude tail, the surviving rate sits inside
+    # LAMBDA_BOUNDS = [0.008, 0.025]. With η_up=2, η_down=3 detection
+    # keeps ~34% of planted (38% off-peak + 22% peak); 1500 planted →
+    # ~510 detected → λ̂ ≈ 0.0145 inside the lambda bounds.
+    n_jumps_planted = 1500
     jump_times = rng.choice(np.arange(1, n_hours), size=n_jumps_planted, replace=False)
     is_up = rng.random(n_jumps_planted) < 0.70
-    true_eta_up = 1.2
-    true_eta_down = 2.0
+    true_eta_up = 2.0
+    true_eta_down = 3.0
     sizes_up = rng.exponential(1.0 / true_eta_up, n_jumps_planted)
     sizes_down = -rng.exponential(1.0 / true_eta_down, n_jumps_planted)
     jump_sizes_arr = np.where(is_up, sizes_up, sizes_down)
@@ -588,10 +651,15 @@ def test_fit_end_to_end_recovers_seasonal_and_ou_under_slow_fast() -> None:
 
     # θ̂_t absorbs the level PLUS the non-zero means of the dummy blocks
     # (Mon and h0 are the omitted references, so DoW/HoD coefs do not sum
-    # to zero across categories). Expected mean of θ̂ in stationary state:
-    #   true_intercept + Σ dow_coefs / 7 + Σ hod_coefs / 24
+    # to zero across categories) PLUS the stationary mean of the jump
+    # component (asymmetric Kou with E[J] ≠ 0):
+    #   E[θ̂] ≈ intercept + Σ dow/7 + Σ hod/24 + λ_planted · E[J] / κ
+    true_E_J = 0.70 / true_eta_up - 0.30 / true_eta_down  # ≈ 0.25
+    lambda_planted = n_jumps_planted / n_hours
+    expected_z_mean = lambda_planted * true_E_J / true_kappa
     expected_theta_mean = (
         true_intercept + true_dow.sum() / 7.0 + true_hod.sum() / 24.0
+        + expected_z_mean
     )
     theta_pw = result.theta_series.iloc[p.ema_span:]
     assert abs(theta_pw.mean() - expected_theta_mean) < 0.05, (
@@ -612,10 +680,15 @@ def test_fit_end_to_end_recovers_seasonal_and_ou_under_slow_fast() -> None:
     np.testing.assert_allclose(p.sigma_by_hour, true_sigma_h, rtol=0.30, atol=0.02)
     # Large jumps recovered (small ones below the k·σ threshold are noise).
     large_planted = int(np.sum(np.abs(jump_sizes_arr) > 0.40))
-    assert 0.70 * large_planted <= result.n_jumps <= 1.50 * large_planted, (
+    assert 0.50 * large_planted <= result.n_jumps <= 1.50 * large_planted, (
         f"detected {result.n_jumps} jumps; large planted {large_planted}"
     )
     assert p.jump_p_up > 0.55
+    # λ̂ must be in bounds (the bounded MLE would have raised otherwise).
+    assert spot.LAMBDA_BOUNDS[0] <= p.jump_intensity <= spot.LAMBDA_BOUNDS[1]
+    assert spot.ETA_BOUNDS[0] <= p.jump_eta_up <= spot.ETA_BOUNDS[1]
+    assert spot.ETA_BOUNDS[0] <= p.jump_eta_down <= spot.ETA_BOUNDS[1]
+    assert spot.KAPPA_BOUNDS[0] <= p.kappa <= spot.KAPPA_BOUNDS[1]
     # Slow factor RW params: drift ≈ 0, sigma small (since no trend planted).
     assert abs(p.slow_factor.drift) < 1e-4
     assert p.slow_factor.sigma < 0.005
@@ -628,19 +701,23 @@ def test_fit_end_to_end_recovers_seasonal_and_ou_under_slow_fast() -> None:
 def test_fit_returns_theta_and_x_series_aligned_with_input() -> None:
     """The slow factor and X series are reported on the full input index
     (including the warm-up region) so diagnostic plots can show the EMA
-    settling at the start of the series."""
+    settling at the start of the series. Uses a synthetic series with
+    OU dynamics inside KAPPA_BOUNDS so the bounded MLE converges
+    interior."""
     rng = np.random.default_rng(seed=1)
     n_hours = 24 * 365 * 2
     idx = _hourly_utc("2020-01-01", n_hours)
-    prices = pd.Series(
-        50.0 + 5.0 * rng.standard_normal(n_hours), index=idx, name="p",
-    )
+    kappa, sigma = 0.10, 0.10
+    phi = float(np.exp(-kappa))
+    factor = float(np.sqrt((1 - phi**2) / (2 * kappa)))
+    z = np.zeros(n_hours)
+    for t in range(1, n_hours):
+        z[t] = phi * z[t - 1] + sigma * factor * rng.standard_normal()
+    prices = pd.Series(np.exp(3.5 + z) - 10.0, index=idx, name="p")
     result = spot.fit(prices)
     assert len(result.theta_series) == n_hours
     assert len(result.x_series) == n_hours
-    # x_series at t=0 is exactly zero (ewm starts at the first value).
     assert abs(result.x_series.iloc[0]) < 1e-12
-    # SlowFactorParams populated.
     assert isinstance(result.params.slow_factor, spot.SlowFactorParams)
     assert result.params.ema_span == spot.EMA_SPAN
 
