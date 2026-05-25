@@ -39,6 +39,7 @@ def _trivial_params(**overrides) -> forward.SSParams:
         sigma_chi=overrides.get("sigma_chi", 0.30),
         sigma_xi=overrides.get("sigma_xi", 0.15),
         rho=overrides.get("rho", 0.0),
+        mu_xi=overrides.get("mu_xi", 0.0),
         mu_xi_star=overrides.get("mu_xi_star", 0.0),
         lambda_chi=overrides.get("lambda_chi", 0.0),
         epsilon_m=overrides.get("epsilon_m", 0.02),
@@ -215,3 +216,216 @@ def test_simulate_signature_raises_until_implemented() -> None:
             start=pd.Timestamp("2025-01-01"),
             n_days=10, n_paths=5,
         )
+
+
+# ---- H2. Observation preparation -------------------------------------------
+
+
+def _make_omip_fixture() -> pd.DataFrame:
+    """Two trade dates × handful of contracts for prepare_observations tests."""
+    rows = [
+        # Trade date 2024-01-02: two M contracts + two YR contracts.
+        ("2024-01-02", "M",  "FTB M Feb-24",  60.0),
+        ("2024-01-02", "M",  "FTB M Mar-24",  55.0),
+        ("2024-01-02", "YR", "FTB YR-25",     70.0),
+        ("2024-01-02", "YR", "FTB YR-26",     65.0),
+        # Trade date 2024-01-03.
+        ("2024-01-03", "M",  "FTB M Feb-24",  61.0),
+        ("2024-01-03", "M",  "FTB M Mar-24",  56.0),
+        ("2024-01-03", "YR", "FTB YR-25",     71.0),
+    ]
+    return pd.DataFrame(rows, columns=[
+        "trade_date", "maturity_bucket", "contract", "reference_d_eur_mwh",
+    ])
+
+
+def test_prepare_observations_long_format_shape_and_columns() -> None:
+    omip = _make_omip_fixture()
+    obs = forward.prepare_observations(omip)
+    expected_cols = {
+        "trade_date", "bucket", "delivery_month",
+        "is_yearly", "tau", "log_F",
+    }
+    assert expected_cols.issubset(set(obs.columns))
+    assert len(obs) == len(omip)
+    # M contracts: bucket="M", is_yearly=False.
+    assert (obs.loc[obs["bucket"] == "M", "is_yearly"] == False).all()
+    assert (obs.loc[obs["bucket"] == "YR", "is_yearly"] == True).all()
+    # tau values are positive.
+    assert (obs["tau"] > 0).all()
+    # log_F = ln(reference_d_eur_mwh) — total sum and individual values match.
+    assert abs(obs["log_F"].sum() - np.log(omip["reference_d_eur_mwh"]).sum()) < 1e-10
+
+
+def test_prepare_observations_decodes_contract_to_delivery_month() -> None:
+    omip = _make_omip_fixture()
+    obs = forward.prepare_observations(omip)
+    feb = obs[obs["bucket"] == "M"].iloc[0]
+    # First M contract is "FTB M Feb-24" → February (month=2).
+    assert int(feb["delivery_month"]) == 2
+
+
+def test_prepare_observations_appends_spot_when_omie_provided() -> None:
+    omip = _make_omip_fixture()
+    omie = pd.Series(
+        [62.5, 63.0],
+        index=pd.DatetimeIndex(["2024-01-02", "2024-01-03"], name="trade_date"),
+        name="price",
+    )
+    obs = forward.prepare_observations(omip, omie)
+    spot = obs[obs["bucket"] == "SPOT"]
+    assert len(spot) == 2
+    assert (spot["tau"] == 0.0).all()
+    np.testing.assert_allclose(
+        spot["log_F"].values, np.log(omie.values), atol=1e-12,
+    )
+
+
+# ---- H2. Kalman filter -----------------------------------------------------
+
+
+def _synthetic_ss_observations(
+    params: forward.SSParams,
+    n_dates: int,
+    *,
+    initial_chi: float,
+    initial_xi: float,
+    contracts_per_date: int = 4,
+    seed: int,
+) -> tuple[pd.DataFrame, np.ndarray, np.ndarray]:
+    """Generate synthetic OMIP-like observations from known states.
+
+    Returns:
+        obs_long_df,  chi_true (n_dates,), xi_true (n_dates,)
+    """
+    rng = np.random.default_rng(seed=seed)
+    trade_dates = pd.date_range("2022-01-03", periods=n_dates, freq="B")
+
+    # Simulate (chi, xi) trajectory under physical measure.
+    dt = 1.0 / forward.DAYS_PER_YEAR  # ~1 business day in years
+    phi = float(np.exp(-params.kappa * dt))
+    q11 = params.sigma_chi**2 * (1 - np.exp(-2*params.kappa*dt)) / (2*params.kappa)
+    q22 = params.sigma_xi**2 * dt
+    q12 = params.rho * params.sigma_chi * params.sigma_xi * (1 - np.exp(-params.kappa*dt)) / params.kappa
+    Q = np.array([[q11, q12], [q12, q22]])
+    L = np.linalg.cholesky(Q)
+    chi_true = np.empty(n_dates)
+    xi_true = np.empty(n_dates)
+    chi_true[0], xi_true[0] = initial_chi, initial_xi
+    for t in range(1, n_dates):
+        innov = L @ rng.standard_normal(2)
+        chi_true[t] = phi * chi_true[t-1] + innov[0]
+        xi_true[t] = xi_true[t-1] + params.mu_xi * dt + innov[1]
+
+    rows = []
+    for i, td in enumerate(trade_dates):
+        # contracts_per_date = 2 monthly + 2 yearly.
+        # Monthly: delivery 30, 90 days out.
+        for tau_days, m in ((30, ((td.month % 12) + 1)), (90, ((td.month + 2) % 12) + 1)):
+            tau = tau_days / forward.DAYS_PER_YEAR
+            true_logF = (
+                np.exp(-params.kappa * tau) * chi_true[i]
+                + xi_true[i]
+                + float(forward.A_function(
+                    tau, kappa=params.kappa,
+                    sigma_chi=params.sigma_chi, sigma_xi=params.sigma_xi,
+                    rho=params.rho, mu_xi_star=params.mu_xi_star,
+                    lambda_chi=params.lambda_chi,
+                ))
+                + forward._seasonal_value(params.seasonal_dummies, m)
+            )
+            noisy = true_logF + params.epsilon_m * rng.standard_normal()
+            rows.append({
+                "trade_date": td.normalize(),
+                "bucket": "M",
+                "delivery_month": m,
+                "is_yearly": False,
+                "tau": tau,
+                "log_F": noisy,
+            })
+        # Yearly: 1y and 3y out (midpoint).
+        for tau_yr in (1.0, 3.0):
+            true_logF = (
+                np.exp(-params.kappa * tau_yr) * chi_true[i]
+                + xi_true[i]
+                + float(forward.A_function(
+                    tau_yr, kappa=params.kappa,
+                    sigma_chi=params.sigma_chi, sigma_xi=params.sigma_xi,
+                    rho=params.rho, mu_xi_star=params.mu_xi_star,
+                    lambda_chi=params.lambda_chi,
+                ))
+                + forward._seasonal_yearly(params.seasonal_dummies)
+            )
+            noisy = true_logF + params.epsilon_yr * rng.standard_normal()
+            rows.append({
+                "trade_date": td.normalize(),
+                "bucket": "YR",
+                "delivery_month": 0,
+                "is_yearly": True,
+                "tau": tau_yr,
+                "log_F": noisy,
+            })
+    obs = pd.DataFrame(rows)
+    return obs, chi_true, xi_true
+
+
+def test_kalman_filter_recovers_latent_states_from_synthetic() -> None:
+    """Kalman filter on synthetic obs with KNOWN params should produce
+    state estimates close to the true (chi_t, xi_t) trajectory."""
+    params = _trivial_params(
+        kappa=1.5, sigma_chi=0.3, sigma_xi=0.15, rho=0.2,
+        mu_xi=0.02, mu_xi_star=0.0, lambda_chi=0.0,
+        epsilon_m=0.005, epsilon_yr=0.01,
+        seasonal_dummies=np.linspace(0.05, -0.05, 11),
+    )
+    obs, chi_true, xi_true = _synthetic_ss_observations(
+        params, n_dates=400, initial_chi=0.1, initial_xi=4.0, seed=42,
+    )
+    res = forward._kalman_filter(obs, params)
+    # Drop the first 50 dates as filter burn-in (especially for xi with
+    # diffuse prior). Then state estimates should track truth tightly.
+    chi_est = res["chi_series"].values
+    xi_est = res["xi_series"].values
+    err_chi = np.abs(chi_est[50:] - chi_true[50:])
+    err_xi = np.abs(xi_est[50:] - xi_true[50:])
+    assert err_chi.mean() < 0.05, f"chi mean abs err = {err_chi.mean():.4f}"
+    assert err_xi.mean() < 0.10, f"xi mean abs err = {err_xi.mean():.4f}"
+
+
+def test_kalman_filter_log_likelihood_is_finite() -> None:
+    params = _trivial_params(
+        kappa=1.5, sigma_chi=0.3, sigma_xi=0.15, rho=0.2,
+        mu_xi=0.02, mu_xi_star=0.0, lambda_chi=0.0,
+        epsilon_m=0.01, epsilon_yr=0.02,
+    )
+    obs, _, _ = _synthetic_ss_observations(
+        params, n_dates=100, initial_chi=0.0, initial_xi=4.0, seed=1,
+    )
+    res = forward._kalman_filter(obs, params, return_states=False)
+    assert np.isfinite(res["log_likelihood"])
+    assert res["n_obs"] == 100 * 4   # 4 contracts per date
+    assert res["n_dates"] == 100
+    assert res["rmse_log_m"] > 0 and res["rmse_log_m"] < 0.05
+    assert res["rmse_log_yr"] > 0 and res["rmse_log_yr"] < 0.05
+
+
+def test_kalman_filter_better_params_yield_higher_likelihood() -> None:
+    """Among the true params and a perturbed set, the true params must
+    produce a higher Kalman log-likelihood (model evidence)."""
+    params_true = _trivial_params(
+        kappa=1.5, sigma_chi=0.3, sigma_xi=0.15, rho=0.2,
+        mu_xi=0.02, mu_xi_star=0.0, lambda_chi=0.0,
+        epsilon_m=0.005, epsilon_yr=0.01,
+    )
+    obs, _, _ = _synthetic_ss_observations(
+        params_true, n_dates=200, initial_chi=0.0, initial_xi=4.0, seed=7,
+    )
+    ll_true = forward._kalman_filter(obs, params_true, return_states=False)["log_likelihood"]
+    # Perturb kappa significantly.
+    params_wrong = _trivial_params(
+        kappa=3.5, sigma_chi=0.3, sigma_xi=0.15, rho=0.2,
+        mu_xi=0.02, mu_xi_star=0.0, lambda_chi=0.0,
+        epsilon_m=0.005, epsilon_yr=0.01,
+    )
+    ll_wrong = forward._kalman_filter(obs, params_wrong, return_states=False)["log_likelihood"]
+    assert ll_true > ll_wrong
