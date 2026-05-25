@@ -295,20 +295,22 @@ def test_detect_jumps_requires_tz() -> None:
 
 
 def test_detect_jumps_recovers_planted_jumps_with_high_precision_and_recall() -> None:
-    """Plant 50 known jumps in ~1 year of returns; recover >= 90% with
-    matching precision and tolerable false-positive rate."""
+    """Plant 50 known jumps of ±1.0 in ~1 year of returns; the refined
+    detector with k_base=4.0 and amplitude_min=0.30 should recover them."""
     n_hours = 24 * 400
     n_jumps = 50
     rng = np.random.default_rng(seed=2026)
     jump_idx = rng.choice(n_hours, size=n_jumps, replace=False)
-    # Jumps of ±1.0 sit comfortably above the worst-hour σ ~ 0.22 even
-    # at the k=4 threshold (signal-to-noise ≈ 4.6).
     jump_sizes = rng.choice([-1.0, 1.0], size=n_jumps)
     rr = _synthetic_returns_with_jumps(
         n_hours, jump_idx, jump_sizes, seed=2026,
     )
 
-    flagged = spot._detect_jumps(rr, k=4.0)
+    # Use k_base=k_peak=4.0 to recover the previous behaviour and isolate
+    # the floor effect; planted ±1.0 jumps pass the 0.30 amplitude floor.
+    flagged = spot._detect_jumps(
+        rr, k_base=4.0, k_peak=4.0, amplitude_min=0.30,
+    )
     truth = np.zeros(n_hours, dtype=bool)
     truth[jump_idx] = True
 
@@ -323,15 +325,17 @@ def test_detect_jumps_recovers_planted_jumps_with_high_precision_and_recall() ->
 
 
 def test_detect_jumps_low_false_positive_on_pure_gaussian() -> None:
-    """No jumps planted; at k=4 the false-positive rate should be ~0.5%."""
+    """No jumps planted; at k_base=4 the false-positive rate from the
+    σ-threshold step alone is ~0.5%. With the amplitude floor at 0.30
+    on σ ≈ 0.10 returns, FP collapses to essentially zero."""
     n_hours = 24 * 365
     rng = np.random.default_rng(seed=99)
     idx = _hourly_utc("2023-01-01", n_hours)
     rr = pd.Series(rng.standard_normal(n_hours) * 0.10, index=idx)
-    flagged = spot._detect_jumps(rr, k=4.0)
+    flagged = spot._detect_jumps(
+        rr, k_base=4.0, k_peak=4.0, amplitude_min=0.30,
+    )
     fp_rate = float(flagged.mean())
-    # Theory: 2·Φ(-4) ≈ 6.3e-5. With finite-sample noise + iterative
-    # refinement we cap at 0.005 (0.5%), which is still well under 1%.
     assert fp_rate < 0.005, f"fp_rate={fp_rate:.4%}"
 
 
@@ -343,12 +347,70 @@ def test_detect_jumps_converges_within_max_iter() -> None:
     jump_idx = rng.choice(n_hours, size=n_jumps, replace=False)
     jump_sizes = rng.normal(0.0, 0.6, size=n_jumps)
     rr = _synthetic_returns_with_jumps(n_hours, jump_idx, jump_sizes, seed=11)
-    # max_iter=2 must produce a stable enough mask (test runs but does not
-    # explode on tight budgets).
-    flagged_short = spot._detect_jumps(rr, k=4.0, max_iter=2)
-    flagged_full = spot._detect_jumps(rr, k=4.0, max_iter=10)
-    # The full iteration finds at least as many jumps as the truncated one.
+    flagged_short = spot._detect_jumps(
+        rr, k_base=4.0, k_peak=4.0, amplitude_min=0.30, max_iter=2,
+    )
+    flagged_full = spot._detect_jumps(
+        rr, k_base=4.0, k_peak=4.0, amplitude_min=0.30, max_iter=10,
+    )
     assert int(flagged_full.sum()) >= int(flagged_short.sum())
+
+
+def test_detect_jumps_amplitude_floor_drops_small_breaches() -> None:
+    """A planted jump of size 0.20 (above k·σ but below amplitude floor)
+    must NOT be flagged."""
+    n_hours = 24 * 200
+    rng = np.random.default_rng(seed=42)
+    idx = _hourly_utc("2022-01-01", n_hours)
+    # Pure low-σ noise plus a small spike of 0.20 (above 4·σ=0.04 but
+    # below amplitude_min=0.30).
+    rr = pd.Series(rng.standard_normal(n_hours) * 0.01, index=idx)
+    small_jump_loc = n_hours // 2
+    rr.iloc[small_jump_loc] = 0.20
+    flagged = spot._detect_jumps(
+        rr, k_base=4.0, k_peak=4.0, amplitude_min=0.30,
+    )
+    assert flagged.iloc[small_jump_loc] is np.False_ or not bool(flagged.iloc[small_jump_loc])
+    # With the floor lowered to 0.05, the same spike IS flagged.
+    flagged_loose = spot._detect_jumps(
+        rr, k_base=4.0, k_peak=4.0, amplitude_min=0.05,
+    )
+    assert bool(flagged_loose.iloc[small_jump_loc])
+
+
+def test_detect_jumps_peak_hour_threshold_lets_through_evening_spikes() -> None:
+    """A jump of size 0.50 at hour 20 (peak) should pass k_base=4.5·σ
+    BUT fail k_peak=6.0·σ when σ ~ 0.10. Conversely at hour 04 (off-peak)
+    the SAME jump passes the relaxed k_base threshold but no peak rule
+    applies. The peak-hour bump is doing real work."""
+    n_hours = 24 * 200
+    rng = np.random.default_rng(seed=7)
+    idx = _hourly_utc("2022-01-01", n_hours)
+    # σ ≈ 0.10; 4.5·σ ≈ 0.45; 6.0·σ ≈ 0.60.
+    rr = pd.Series(rng.standard_normal(n_hours) * 0.10, index=idx)
+
+    # Inject a 0.50 jump at one peak hour (h20) and one off-peak (h04).
+    peak_loc = None; off_loc = None
+    for i, ts in enumerate(idx):
+        if peak_loc is None and ts.hour == 20:
+            rr.iloc[i] = 0.50
+            peak_loc = i
+        if off_loc is None and ts.hour == 4:
+            rr.iloc[i] = 0.50
+            off_loc = i
+        if peak_loc is not None and off_loc is not None:
+            break
+
+    flagged = spot._detect_jumps(
+        rr,
+        k_base=4.5, k_peak=6.0,
+        peak_hours=(18, 19, 20, 21, 22),
+        amplitude_min=0.30,
+    )
+    # Off-peak jump: 0.50 > 4.5·σ AND > 0.30 floor → flagged.
+    assert bool(flagged.iloc[off_loc])
+    # Peak jump: 0.50 < 6.0·σ ≈ 0.60 → NOT flagged despite passing floor.
+    assert not bool(flagged.iloc[peak_loc])
 
 
 # ---- D. MLE OU + Kou jumps -------------------------------------------------

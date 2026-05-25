@@ -184,7 +184,10 @@ def fit(
     price_shift: float = PRICE_SHIFT,
     fourier_harmonics: int = FOURIER_HARMONICS,
     ema_span: int = EMA_SPAN,
-    jump_threshold_k: float = JUMP_THRESHOLD_K_BASE,
+    jump_k_base: float = JUMP_THRESHOLD_K_BASE,
+    jump_k_peak: float = JUMP_THRESHOLD_K_PEAK,
+    jump_peak_hours: tuple[int, ...] = JUMP_PEAK_HOURS_UTC,
+    jump_amplitude_min: float = JUMP_AMPLITUDE_MIN,
     jump_max_iter: int = JUMP_MAX_ITER,
 ) -> SpotModelFit:
     """Fit the slow-fast MRJD model to a UTC-hourly price series.
@@ -203,10 +206,12 @@ def fit(
         component.
     ema_span
         Span (in hours) of the causal EMA used for the slow factor θ_t.
-    jump_threshold_k
-        Sigma-multiplier for the iterative jump detector (Commit G1
-        passes a single global value; Commit G2 introduces the
-        peak-hour dynamic threshold).
+    jump_k_base, jump_k_peak, jump_peak_hours, jump_amplitude_min
+        Refined-detection knobs forwarded to :func:`_detect_jumps`. The
+        peak-hour threshold ``jump_k_peak`` applies to the UTC hours in
+        ``jump_peak_hours`` (default 18-22), ``jump_k_base`` everywhere
+        else; ``jump_amplitude_min`` is the absolute-log-return floor
+        below which σ-threshold breaches are ignored.
     jump_max_iter
         Maximum iterations of the jump detector.
 
@@ -245,7 +250,10 @@ def fit(
 
     jumps_mask = _detect_jumps(
         residual_returns,
-        k=jump_threshold_k,
+        k_base=jump_k_base,
+        k_peak=jump_k_peak,
+        peak_hours=jump_peak_hours,
+        amplitude_min=jump_amplitude_min,
         max_iter=jump_max_iter,
     )
     jump_sizes = residual_returns[jumps_mask].rename("jump_sizes")
@@ -454,17 +462,32 @@ def _seasonal_predict(
 
 def _detect_jumps(
     residual_returns: pd.Series,
-    k: float = JUMP_THRESHOLD_K_BASE,
+    k_base: float = JUMP_THRESHOLD_K_BASE,
+    k_peak: float = JUMP_THRESHOLD_K_PEAK,
+    peak_hours: tuple[int, ...] = JUMP_PEAK_HOURS_UTC,
+    amplitude_min: float = JUMP_AMPLITUDE_MIN,
     max_iter: int = JUMP_MAX_ITER,
 ) -> pd.Series:
-    """Iterative threshold jump detector with σ updated by hour-of-day.
+    """Iterative threshold jump detector with σ updated by hour-of-day,
+    a peak-hour-specific threshold and an absolute amplitude floor.
 
     At each iteration the per-hour mean μ_h and standard deviation σ_h
-    are computed from the currently un-flagged residual returns; a return
-    is flagged when ``|ΔZ_t − μ_{h(t)}| > k · σ_{h(t)}``. Iteration stops
-    when the flagged set stabilises or ``max_iter`` is reached. Hours
-    with fewer than five non-jump observations are skipped (no jumps
-    declared for that bucket on this iteration).
+    are computed from the currently un-flagged returns. A return at
+    hour ``h(t)`` is flagged a jump when BOTH:
+
+        |ΔZ_t − μ_{h(t)}| > k_h · σ_{h(t)}    (dynamic σ-threshold)
+        |ΔZ_t|             > amplitude_min     (absolute floor in log)
+
+    where ``k_h = k_peak`` if ``h ∈ peak_hours`` else ``k_base``. The
+    peak-hour threshold targets the evening price band (default
+    18-22 UTC ≈ 20-24 local in CET summer) where intraday volatility
+    is structurally higher and the base threshold over-flags ordinary
+    returns. The amplitude floor knocks out any sub-0.30-log "jumps"
+    that the threshold step might pick up on quiet periods.
+
+    Iteration stops when the flagged set stabilises or ``max_iter`` is
+    reached. Hours with fewer than five non-jump observations are
+    skipped on the current iteration.
     """
     if residual_returns.index.tz is None:
         raise ValueError("residual_returns must be UTC-tz-aware")
@@ -472,6 +495,9 @@ def _detect_jumps(
     hours = np.asarray(residual_returns.index.hour)
     values = residual_returns.to_numpy(dtype=float)
     is_jump = np.zeros(len(values), dtype=bool)
+    peak_set = set(int(h) for h in peak_hours)
+
+    abs_floor_mask = np.abs(values) > amplitude_min
 
     for _ in range(max_iter):
         new_is_jump = np.zeros_like(is_jump)
@@ -484,7 +510,9 @@ def _detect_jumps(
             sd_h = float(values[mask_h_nonjump].std(ddof=1))
             if sd_h <= 0.0 or not np.isfinite(sd_h):
                 continue
-            new_is_jump[mask_h] = np.abs(values[mask_h] - mu_h) > k * sd_h
+            k_h = k_peak if h in peak_set else k_base
+            threshold_breached = np.abs(values - mu_h) > k_h * sd_h
+            new_is_jump[mask_h] = mask_h[mask_h] & threshold_breached[mask_h] & abs_floor_mask[mask_h]
         if np.array_equal(new_is_jump, is_jump):
             break
         is_jump = new_is_jump
