@@ -777,6 +777,46 @@ def test_simulate_jumps_increase_dispersion() -> None:
     assert float(b.std()) > float(a.std())
 
 
+def test_simulate_slow_factor_drift_shifts_long_horizon_mean() -> None:
+    """With drift > 0 and noise = 0, θ_t marches linearly upward; the
+    long-horizon mean price must climb above the no-drift baseline."""
+    start = pd.Timestamp("2025-01-01", tz="UTC")
+    p_flat = _trivial_params(slow_drift=0.0, slow_sigma=0.0, jump_intensity=0.0)
+    p_drift = _trivial_params(
+        slow_drift=5e-5,  # +0.05 in log over ~1000 h, +0.44 over a year
+        slow_sigma=0.0,
+        jump_intensity=0.0,
+    )
+    flat = spot.simulate(p_flat, start, 24 * 365, 50, seed=42)
+    drifting = spot.simulate(p_drift, start, 24 * 365, 50, seed=42)
+    # Mean of the drifting run is meaningfully higher than the flat run.
+    assert drifting.mean() > flat.mean() + 5.0
+
+
+def test_simulate_slow_factor_noise_inflates_long_horizon_dispersion() -> None:
+    """drift = 0, sigma > 0 → θ_t is a zero-drift RW that adds variance
+    over long horizons; price dispersion must grow vs the flat case."""
+    start = pd.Timestamp("2025-01-01", tz="UTC")
+    p_flat = _trivial_params(slow_drift=0.0, slow_sigma=0.0, jump_intensity=0.0)
+    # σ_θ = 0.004 contributes ~0.004·√8760 ≈ 0.37 to the cumulative log-std
+    # over the year, vs ~0.22 from the OU. Combined std multiplier ≈ 1.9.
+    p_noisy = _trivial_params(slow_drift=0.0, slow_sigma=0.004, jump_intensity=0.0)
+    flat = spot.simulate(p_flat, start, 24 * 365, 100, seed=7)
+    noisy = spot.simulate(p_noisy, start, 24 * 365, 100, seed=7)
+    assert float(noisy.std()) > 1.5 * float(flat.std())
+
+
+def test_simulate_initial_theta_propagates_to_t0() -> None:
+    """initial_theta shifts the time-0 log-price by the same amount."""
+    params = _trivial_params(intercept=0.0)
+    start = pd.Timestamp("2025-01-01", tz="UTC")
+    a = spot.simulate(params, start, 10, 5, initial_theta=0.0, seed=1)
+    b = spot.simulate(params, start, 10, 5, initial_theta=2.0, seed=1)
+    # Initial residual default 0, intercept 0, so t=0 price = exp(theta_0) - 10.
+    np.testing.assert_allclose(a[:, 0], np.exp(0.0) - 10.0, atol=1e-9)
+    np.testing.assert_allclose(b[:, 0], np.exp(2.0) - 10.0, atol=1e-9)
+
+
 def test_simulate_seasonal_profile_appears_in_paths() -> None:
     """Strong HoD seasonality must show up as an hour-of-day price profile
     when averaged across many paths."""

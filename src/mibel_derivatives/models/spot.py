@@ -303,25 +303,44 @@ def simulate(
     n_hours: int,
     n_paths: int,
     *,
+    initial_theta: float = 0.0,
     initial_residual: float = 0.0,
     seed: int | None = None,
 ) -> np.ndarray:
     """Simulate ``n_paths`` forward nominal-price trajectories of length
     ``n_hours`` from ``start`` (UTC).
 
-    The returned array has shape ``(n_paths, n_hours)`` in EUR/MWh
-    (the shift c is removed before returning, so negative samples are
-    possible when the simulated log-shifted price is below ``log(c)``).
+    The structural composition is the inverse of :func:`fit`:
 
-    Discretisation:
+        θ_{t+1} = θ_t + μ_θ + σ_θ · ξ_t,             ξ_t ~ N(0, 1)
+        Z_{t+1} = φ Z_t + σ_{h(t+1)} √((1−φ²)/(2κ)) ε_t + J_t B_t
+        log(P_t + c) = θ_t + s(t) + Z_t
+        P_t = exp(log(P_t + c)) − c
 
-        Z_{t+1} = φ Z_t + σ_{h(t+1)} √((1−φ²)/(2κ)) · ε_t  +  J_t · B_t
+    where (μ_θ, σ_θ) come from ``params.slow_factor``, ε_t ~ N(0, 1),
+    B_t ~ Bernoulli(λ) and J_t is drawn from the Kou asymmetric
+    double-exponential.
 
-    where ε_t ~ N(0, 1), B_t ~ Bernoulli(λ) and J_t is drawn from the
-    Kou asymmetric double-exponential (Bernoulli is exact for
-    Poisson-per-hour with ``λ Δt ≪ 1``; for ``λ Δt = 0.01`` the
-    probability of two jumps in the same hour is below 5e-5 and is
-    ignored). Reproducible given ``seed``.
+    Inputs
+    ------
+    initial_theta
+        Starting value of the slow factor at ``start`` (typically the
+        last value of the historical ``theta_series`` from
+        :class:`SpotModelFit`). Default 0.0 — fine for unit tests and
+        for cases where the level is already absorbed into the
+        seasonality intercept.
+    initial_residual
+        Starting value of the fast residual Z_t at ``start``. Default
+        0.0 (the OU stationary mean).
+    seed
+        Reproducibility.
+
+    The returned array has shape ``(n_paths, n_hours)`` in EUR/MWh.
+    Negative samples are possible when ``θ_t + s(t) + Z_t`` falls
+    below ``log(c)``.
+
+    Bernoulli(λ) is an exact substitute for Poisson(λ Δt) under
+    ``λ Δt ≪ 1`` (electricity hourly intensities are ~10⁻²).
     """
     if start.tz is None:
         raise ValueError("start must be a UTC-tz-aware Timestamp")
@@ -335,13 +354,22 @@ def simulate(
 
     seasonal_t = _seasonal_predict(params.seasonality, idx).to_numpy()
 
+    # --- Slow factor θ_t: arithmetic RW with drift+noise. -----------------
+    drift = params.slow_factor.drift
+    theta_sigma = params.slow_factor.sigma
+    theta_innov = rng.standard_normal((n_paths, n_hours))
+    delta_theta = drift + theta_sigma * theta_innov
+    delta_theta[:, 0] = 0.0  # t=0 is the initial condition itself
+    theta = initial_theta + np.cumsum(delta_theta, axis=1)
+
+    # --- Fast residual Z_t: OU + Bernoulli·Kou. ---------------------------
     kappa = params.kappa
     phi = float(np.exp(-kappa))
     factor = float(np.sqrt((1.0 - phi**2) / (2.0 * kappa)))
     hours = np.asarray(idx.hour)
     sigma_step = params.sigma_by_hour[hours] * factor  # (n_hours,)
 
-    normals = rng.standard_normal((n_paths, n_hours))
+    z_innov = rng.standard_normal((n_paths, n_hours))
     jump_occurs = rng.random((n_paths, n_hours)) < params.jump_intensity
     n_jumps_total = int(jump_occurs.sum())
     jump_grid = np.zeros((n_paths, n_hours))
@@ -357,11 +385,11 @@ def simulate(
     for t in range(1, n_hours):
         z[:, t] = (
             phi * z[:, t - 1]
-            + sigma_step[t] * normals[:, t]
+            + sigma_step[t] * z_innov[:, t]
             + jump_grid[:, t]
         )
 
-    log_p = seasonal_t[np.newaxis, :] + z
+    log_p = theta + seasonal_t[np.newaxis, :] + z
     return np.exp(log_p) - params.price_shift
 
 
