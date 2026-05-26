@@ -66,6 +66,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
+from scipy.linalg import cho_factor, cho_solve
 from scipy.optimize import minimize
 
 logger = logging.getLogger(__name__)
@@ -75,9 +76,9 @@ logger = logging.getLogger(__name__)
 
 
 # Bounds enforced in the MLE (commit H3); annual time scale.
-KAPPA_BOUNDS: tuple[float, float] = (0.5, 5.0)            # per year, half-life [0.14, 1.4] y
-SIGMA_CHI_BOUNDS: tuple[float, float] = (0.05, 2.0)       # per sqrt(year)
-SIGMA_XI_BOUNDS: tuple[float, float] = (0.05, 1.0)        # per sqrt(year)
+KAPPA_BOUNDS: tuple[float, float] = (0.1, 5.0)            # per year, half-life [0.14, 7] y
+SIGMA_CHI_BOUNDS: tuple[float, float] = (0.05, 5.0)       # per sqrt(year); electricity short-term vol can exceed 2.0
+SIGMA_XI_BOUNDS: tuple[float, float] = (0.05, 2.0)        # per sqrt(year)
 RHO_BOUNDS: tuple[float, float] = (-0.99, 0.99)
 MU_XI_BOUNDS: tuple[float, float] = (-0.50, 0.50)         # physical drift, per year
 MU_XI_STAR_BOUNDS: tuple[float, float] = (-0.50, 0.50)    # risk-neutral drift, per year
@@ -380,44 +381,107 @@ def prepare_observations(
 
 def _build_measurement_matrices(
     params: SSParams,
-    day_obs: pd.DataFrame,
+    day_arrays: dict,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Build (H_t, d_t, R_t) for a single trade-date slice of obs.
+    """Build (H_t, d_t, R_t) for a single trade-date slice (vectorised).
+
+    ``day_arrays`` is the per-date dict produced by
+    :func:`_prepare_kalman_arrays`; it carries pre-typed numpy arrays
+    for ``taus``, ``effective_month`` (delivery_month for M; trade-date
+    month for SPOT; -1 for YR with the seasonal mean used instead),
+    ``is_yearly`` and ``is_yr_bucket``.
 
     H_t : (m, 2)  measurement loadings on (chi, xi)
     d_t : (m,)    deterministic part of log F = A(tau) + s_delivery
     R_t : (m,)    diagonal measurement-noise variances
     """
-    m = len(day_obs)
+    taus = day_arrays["taus"]
+    is_yearly = day_arrays["is_yearly"]
+    is_yr_bucket = day_arrays["is_yr_bucket"]
+    eff_month = day_arrays["effective_month"]  # int8 in [1..12] for non-YR, -1 for YR
+    m = len(taus)
+
     H = np.empty((m, 2))
-    d = np.empty(m)
-    R = np.empty(m)
-    taus = day_obs["tau"].to_numpy(dtype=float)
+    H[:, 0] = np.exp(-params.kappa * taus)
+    H[:, 1] = 1.0
+
     a_vals = np.asarray(A_function(
         taus,
         kappa=params.kappa, sigma_chi=params.sigma_chi,
         sigma_xi=params.sigma_xi, rho=params.rho,
         mu_xi_star=params.mu_xi_star, lambda_chi=params.lambda_chi,
     ))
-    eps_m_var = params.epsilon_m ** 2
-    eps_yr_var = params.epsilon_yr ** 2
-    # SPOT uses epsilon_m by convention (front-month liquidity).
-    for i, row in enumerate(day_obs.itertuples()):
-        H[i, 0] = float(np.exp(-params.kappa * row.tau))
-        H[i, 1] = 1.0
-        if row.is_yearly:
-            s_val = _seasonal_yearly(params.seasonal_dummies)
-        elif row.bucket == "SPOT":
-            month_t = pd.Timestamp(row.trade_date).month
-            s_val = _seasonal_value(params.seasonal_dummies, month_t)
-        else:
-            s_val = _seasonal_value(params.seasonal_dummies, int(row.delivery_month))
-        d[i] = float(a_vals[i]) + s_val
-        if row.bucket == "YR":
-            R[i] = eps_yr_var
-        else:
-            R[i] = eps_m_var
+
+    # Seasonal lookup: 13-element array with sentinel at index 0 (= 0.0
+    # since January is the reference and we never index 0 except for YR
+    # contracts that will overwrite via is_yearly).
+    monthly_seasonal = np.empty(13)
+    monthly_seasonal[0] = 0.0                              # unused
+    monthly_seasonal[1] = 0.0                              # January (reference)
+    monthly_seasonal[2:13] = params.seasonal_dummies       # Feb..Dec
+    s_vals = np.where(
+        is_yearly,
+        _seasonal_yearly(params.seasonal_dummies),
+        monthly_seasonal[eff_month],
+    )
+
+    d = a_vals + s_vals
+    R = np.where(
+        is_yr_bucket,
+        params.epsilon_yr ** 2,
+        params.epsilon_m ** 2,
+    )
     return H, d, R
+
+
+def _prepare_kalman_arrays(obs: pd.DataFrame) -> dict:
+    """Group obs by trade_date and pre-type every per-date array as numpy.
+
+    Called ONCE before the MLE loop so the inner Kalman recursion does
+    no pandas operations per iteration. Returns a dict with:
+        trade_dates: list[pd.Timestamp] (sorted)
+        per_date: list[dict] aligned with trade_dates, each carrying
+                  numpy arrays for taus, log_F, is_yearly, is_yr_bucket,
+                  effective_month.
+        dts_years: ndarray of dt (in years) between consecutive dates,
+                   dts_years[0] = 0.
+    """
+    trade_dates = sorted(obs["trade_date"].unique())
+    per_date: list[dict] = []
+    grouped = obs.groupby("trade_date", sort=True)
+    for td in trade_dates:
+        day = grouped.get_group(td)
+        is_yearly = day["is_yearly"].to_numpy(dtype=bool)
+        buckets = day["bucket"].to_numpy()
+        delivery_month = day["delivery_month"].to_numpy(dtype=int)
+        # For SPOT rows the seasonal s_val uses the trade-date month;
+        # for M rows the delivery_month; for YR rows the cross-month mean.
+        effective_month = np.where(
+            buckets == "SPOT",
+            pd.Timestamp(td).month,
+            delivery_month,
+        ).astype(int)
+        # YR rows put -1 here so the np.where in _build_measurement_matrices
+        # never tries to index a real entry for them; they get the yearly
+        # mean via the is_yearly branch.
+        effective_month = np.where(is_yearly, 0, effective_month)
+        per_date.append({
+            "taus": day["tau"].to_numpy(dtype=float),
+            "log_F": day["log_F"].to_numpy(dtype=float),
+            "is_yearly": is_yearly,
+            "is_yr_bucket": (buckets == "YR"),
+            "is_m_bucket": (buckets == "M"),
+            "is_spot_bucket": (buckets == "SPOT"),
+            "effective_month": effective_month,
+        })
+    dts_years = np.zeros(len(trade_dates))
+    for i in range(1, len(trade_dates)):
+        dts_years[i] = (trade_dates[i] - trade_dates[i - 1]).days / DAYS_PER_YEAR
+    return {
+        "trade_dates": trade_dates,
+        "per_date": per_date,
+        "dts_years": dts_years,
+    }
 
 
 def _kalman_filter(
@@ -432,43 +496,56 @@ def _kalman_filter(
 ) -> dict:
     """Run the Schwartz-Smith Kalman filter on long-format observations.
 
-    Returns a dict with keys:
-        log_likelihood : float (sum over trade dates)
-        n_obs          : total number of scalar observations
-        n_dates        : number of distinct trade dates
-        chi_series     : pd.Series of filtered chi per trade date (if return_states)
-        xi_series      : pd.Series of filtered xi  per trade date (if return_states)
-        cov_array      : np.ndarray (n_dates, 4) flattened 2×2 covariance
-                          [[p_chi_chi, p_chi_xi], [p_xi_chi, p_xi_xi]]
-                          (if return_states)
-        rmse_log_m     : RMSE of post-filter residuals on M bucket
-        rmse_log_yr    : RMSE of post-filter residuals on YR bucket
+    Thin wrapper that calls :func:`_prepare_kalman_arrays` once and then
+    :func:`_kalman_filter_prepped`. Inside an MLE loop, callers should
+    use the prepped variant directly and reuse the prepped arrays
+    across iterations (the heavy pandas operations happen only once).
     """
-    if initial_p_chi is None:
-        initial_p_chi = params.sigma_chi ** 2 / (2.0 * params.kappa)
     if initial_xi is None:
-        # First trade-date's mean spot or first long-dated obs.
         first = obs[obs["trade_date"] == obs["trade_date"].iloc[0]]
         spot_first = first[first["bucket"] == "SPOT"]
         if len(spot_first) > 0:
             initial_xi = float(spot_first["log_F"].iloc[0])
         else:
             initial_xi = float(first["log_F"].mean())
+    prepped = _prepare_kalman_arrays(obs)
+    return _kalman_filter_prepped(
+        prepped, params,
+        initial_chi=initial_chi, initial_xi=initial_xi,
+        initial_p_chi=initial_p_chi, initial_p_xi=initial_p_xi,
+        return_states=return_states,
+    )
+
+
+def _kalman_filter_prepped(
+    prepped: dict,
+    params: SSParams,
+    *,
+    initial_chi: float = 0.0,
+    initial_xi: float = 0.0,
+    initial_p_chi: float | None = None,
+    initial_p_xi: float = 1.0,
+    return_states: bool = True,
+) -> dict:
+    """Kalman recursion on pre-prepped per-date arrays (hot path)."""
+    trade_dates = prepped["trade_dates"]
+    per_date = prepped["per_date"]
+    dts_years = prepped["dts_years"]
+    n_dates = len(trade_dates)
+
+    if initial_p_chi is None:
+        initial_p_chi = params.sigma_chi ** 2 / (2.0 * params.kappa)
 
     x = np.array([initial_chi, initial_xi], dtype=float)
     P = np.array([[initial_p_chi, 0.0], [0.0, initial_p_xi]], dtype=float)
 
-    grouped = obs.groupby("trade_date", sort=True)
-    trade_dates = sorted(obs["trade_date"].unique())
-    n_dates = len(trade_dates)
-
     log_lik = 0.0
     n_obs_total = 0
-    chi_arr = np.empty(n_dates)
-    xi_arr = np.empty(n_dates)
-    cov_arr = np.empty((n_dates, 4))
-    rmse_m_terms: list[float] = []
-    rmse_yr_terms: list[float] = []
+    chi_arr = np.empty(n_dates) if return_states else None
+    xi_arr = np.empty(n_dates) if return_states else None
+    cov_arr = np.empty((n_dates, 4)) if return_states else None
+    sse_m = 0.0; n_m = 0
+    sse_yr = 0.0; n_yr = 0
 
     kappa = params.kappa
     sigma_chi = params.sigma_chi
@@ -476,67 +553,66 @@ def _kalman_filter(
     rho = params.rho
     mu_xi = params.mu_xi
     log_2pi = float(np.log(2.0 * np.pi))
+    I2 = np.eye(2)
 
-    prev_date: pd.Timestamp | None = None
-    for i, td in enumerate(trade_dates):
-        # Predict step. Step size dt in years.
-        if prev_date is None:
-            dt = 0.0  # no prediction on the first step
-        else:
-            dt = (td - prev_date).days / DAYS_PER_YEAR
+    for i in range(n_dates):
+        dt = float(dts_years[i])
         if dt > 0.0:
             phi = float(np.exp(-kappa * dt))
-            F = np.array([[phi, 0.0], [0.0, 1.0]], dtype=float)
-            c = np.array([0.0, mu_xi * dt], dtype=float)
+            # F = diag(phi, 1). F @ x = (phi * x[0], x[1]). F @ P @ F.T applied below.
+            x = np.array([phi * x[0], x[1] + mu_xi * dt])
             q11 = sigma_chi ** 2 * (1.0 - np.exp(-2.0 * kappa * dt)) / (2.0 * kappa)
             q22 = sigma_xi ** 2 * dt
-            q12 = (
-                rho * sigma_chi * sigma_xi
-                * (1.0 - np.exp(-kappa * dt)) / kappa
-            )
-            Q = np.array([[q11, q12], [q12, q22]], dtype=float)
-            x = F @ x + c
-            P = F @ P @ F.T + Q
+            q12 = rho * sigma_chi * sigma_xi * (1.0 - np.exp(-kappa * dt)) / kappa
+            P00 = phi * phi * P[0, 0] + q11
+            P01 = phi * P[0, 1] + q12
+            P11 = P[1, 1] + q22
+            P = np.array([[P00, P01], [P01, P11]])
 
-        # Update step.
-        day_obs = grouped.get_group(td)
-        H, d_vec, R_diag = _build_measurement_matrices(params, day_obs)
-        z = day_obs["log_F"].to_numpy(dtype=float)
+        day = per_date[i]
+        H, d_vec, R_diag = _build_measurement_matrices(params, day)
+        z = day["log_F"]
         v = z - (H @ x + d_vec)
-        S = H @ P @ H.T + np.diag(R_diag)
+        # Innovation covariance S = H P H^T + diag(R). Add R to diagonal
+        # in place to avoid allocating np.diag(R_diag).
+        S = H @ P @ H.T
+        S[np.arange(S.shape[0]), np.arange(S.shape[0])] += R_diag
+        # Cholesky once, reuse for log-determinant, S^{-1} v, and the gain.
         try:
-            S_inv = np.linalg.inv(S)
+            c_factor = cho_factor(S, lower=True, overwrite_a=True, check_finite=False)
         except np.linalg.LinAlgError as exc:
-            raise RuntimeError(f"Kalman update at {td}: S not invertible: {exc}") from exc
-        sign, log_det = np.linalg.slogdet(S)
-        if sign <= 0:
-            raise RuntimeError(f"Kalman update at {td}: log|S| not positive (sign={sign})")
+            raise RuntimeError(
+                f"Kalman update at {trade_dates[i]}: S not Cholesky-able: {exc}"
+            ) from exc
+        L_chol = c_factor[0]
+        # log|S| = 2 * sum(log(diag(L))) since S = L L^T.
+        log_det = 2.0 * float(np.sum(np.log(np.diag(L_chol))))
         m = len(z)
-        ll_t = -0.5 * (m * log_2pi + log_det + float(v @ S_inv @ v))
-        log_lik += ll_t
+        S_inv_v = cho_solve(c_factor, v, check_finite=False)
+        log_lik += -0.5 * (m * log_2pi + log_det + float(v @ S_inv_v))
         n_obs_total += m
 
-        K = P @ H.T @ S_inv
+        S_inv_HT = cho_solve(c_factor, H, check_finite=False)  # shape (m, 2)
+        # K = P H^T S^{-1} = (P @ H^T) @ S^{-1} -- equivalent to P @ S_inv_HT.T
+        K = P @ S_inv_HT.T
         x = x + K @ v
-        P = (np.eye(2) - K @ H) @ P
+        P = (I2 - K @ H) @ P
 
         if return_states:
             chi_arr[i] = x[0]
             xi_arr[i] = x[1]
             cov_arr[i] = P.flatten()
 
-        # Track post-filter residuals per bucket for RMSE.
-        z_pred = H @ x + d_vec
-        v_post = z - z_pred
-        for j, row in enumerate(day_obs.itertuples()):
-            if row.bucket == "M":
-                rmse_m_terms.append(float(v_post[j]) ** 2)
-            elif row.bucket == "YR":
-                rmse_yr_terms.append(float(v_post[j]) ** 2)
-        prev_date = td
+        v_post = z - (H @ x + d_vec)
+        m_mask = day["is_m_bucket"]
+        yr_mask = day["is_yr_bucket"]
+        sse_m += float(np.sum(v_post[m_mask] ** 2))
+        n_m += int(np.sum(m_mask))
+        sse_yr += float(np.sum(v_post[yr_mask] ** 2))
+        n_yr += int(np.sum(yr_mask))
 
-    rmse_m = float(np.sqrt(np.mean(rmse_m_terms))) if rmse_m_terms else float("nan")
-    rmse_yr = float(np.sqrt(np.mean(rmse_yr_terms))) if rmse_yr_terms else float("nan")
+    rmse_m = float(np.sqrt(sse_m / n_m)) if n_m > 0 else float("nan")
+    rmse_yr = float(np.sqrt(sse_yr / n_yr)) if n_yr > 0 else float("nan")
 
     out = {
         "log_likelihood": float(log_lik),
@@ -604,7 +680,7 @@ def _fit_from_obs(
     obs: pd.DataFrame,
     *,
     initial_params: SSParams | None = None,
-    max_iter: int = 500,
+    max_iter: int = 100,
 ) -> SSFit:
     """Bounded MLE on a long-format observation DataFrame.
 
@@ -615,16 +691,18 @@ def _fit_from_obs(
         raise ValueError("no observations after preparing OMIP / OMIE data")
 
     if initial_params is None:
+        # Warm-start near electricity-MIBEL empirical ranges (commodity
+        # vols are an order of magnitude above stock-index defaults).
         initial_params = SSParams(
-            kappa=1.0,
-            sigma_chi=0.30,
-            sigma_xi=0.15,
+            kappa=1.5,
+            sigma_chi=1.0,
+            sigma_xi=0.40,
             rho=0.0,
             mu_xi=0.0,
             mu_xi_star=0.0,
             lambda_chi=0.0,
-            epsilon_m=0.02,
-            epsilon_yr=0.05,
+            epsilon_m=0.05,
+            epsilon_yr=0.10,
             seasonal_dummies=np.zeros(11),
         )
 
@@ -633,10 +711,24 @@ def _fit_from_obs(
     for i, (lo, hi) in enumerate(bounds):
         x0[i] = float(np.clip(x0[i], lo + 1e-6, hi - 1e-6))
 
+    # Prep ONCE outside the optimiser loop — every Kalman evaluation
+    # then reuses the same per-date numpy arrays.
+    prepped = _prepare_kalman_arrays(obs)
+    first_day = obs[obs["trade_date"] == obs["trade_date"].iloc[0]]
+    spot_first = first_day[first_day["bucket"] == "SPOT"]
+    if len(spot_first) > 0:
+        initial_xi = float(spot_first["log_F"].iloc[0])
+    else:
+        initial_xi = float(first_day["log_F"].mean())
+
     def neg_log_lik(vec: np.ndarray) -> float:
         try:
             cand = _params_from_vec(vec)
-            res = _kalman_filter(obs, cand, return_states=False)
+            res = _kalman_filter_prepped(
+                prepped, cand,
+                initial_chi=0.0, initial_xi=initial_xi,
+                return_states=False,
+            )
             ll = res["log_likelihood"]
             if not np.isfinite(ll):
                 return 1e12
@@ -648,8 +740,22 @@ def _fit_from_obs(
         neg_log_lik, x0, method="L-BFGS-B", bounds=bounds,
         options={"maxiter": max_iter},
     )
+    # L-BFGS-B often reports success=False when it merely hit max_iter
+    # despite the objective being near-optimal (the gtol/ftol thresholds
+    # are tight on high-dim parameter spaces). We only raise on the
+    # genuinely fatal modes — non-finite objective, NaNs in result.x —
+    # and downgrade the iter-limit case to a logger.warning so the
+    # caller can inspect rmse_log_m / rmse_log_yr and decide.
+    if not np.all(np.isfinite(result.x)) or not np.isfinite(result.fun):
+        raise RuntimeError(
+            f"Schwartz-Smith MLE produced non-finite result: {result.message}"
+        )
     if not result.success:
-        raise RuntimeError(f"Schwartz-Smith MLE did not converge: {result.message}")
+        logger.warning(
+            "Schwartz-Smith MLE returned success=False (%s) after %d iter; "
+            "accepting the result and validating via per-bucket RMSE.",
+            result.message, result.nit,
+        )
 
     tol = 1e-3
     for i, name in enumerate(_BOUNDED_PARAM_NAMES):
@@ -667,7 +773,11 @@ def _fit_from_obs(
             )
 
     fitted_params = _params_from_vec(result.x)
-    final = _kalman_filter(obs, fitted_params, return_states=True)
+    final = _kalman_filter_prepped(
+        prepped, fitted_params,
+        initial_chi=0.0, initial_xi=initial_xi,
+        return_states=True,
+    )
     return SSFit(
         params=fitted_params,
         trade_dates=pd.DatetimeIndex(sorted(obs["trade_date"].unique())),

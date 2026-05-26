@@ -29,7 +29,7 @@ def test_module_exposes_public_api() -> None:
     ):
         assert hasattr(forward, name), f"forward.{name} missing"
     assert forward.DAYS_PER_YEAR == 365.25
-    assert forward.KAPPA_BOUNDS == (0.5, 5.0)
+    assert forward.KAPPA_BOUNDS == (0.1, 5.0)
     assert forward.RHO_BOUNDS == (-0.99, 0.99)
 
 
