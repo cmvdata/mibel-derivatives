@@ -66,6 +66,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
+from scipy.optimize import minimize
 
 logger = logging.getLogger(__name__)
 
@@ -555,15 +556,160 @@ def _kalman_filter(
 # ---- Public API (filled in commits H2-H4) ----------------------------------
 
 
+SEASONAL_BOUNDS: tuple[float, float] = (-1.0, 1.0)  # generous interval for the 11 dummies
+
+
+def _params_from_vec(x: np.ndarray) -> SSParams:
+    return SSParams(
+        kappa=float(x[0]),
+        sigma_chi=float(x[1]),
+        sigma_xi=float(x[2]),
+        rho=float(x[3]),
+        mu_xi=float(x[4]),
+        mu_xi_star=float(x[5]),
+        lambda_chi=float(x[6]),
+        epsilon_m=float(x[7]),
+        epsilon_yr=float(x[8]),
+        seasonal_dummies=np.asarray(x[9:20], dtype=float),
+    )
+
+
+def _vec_from_params(p: SSParams) -> np.ndarray:
+    return np.concatenate([
+        np.array([
+            p.kappa, p.sigma_chi, p.sigma_xi, p.rho,
+            p.mu_xi, p.mu_xi_star, p.lambda_chi,
+            p.epsilon_m, p.epsilon_yr,
+        ]),
+        np.asarray(p.seasonal_dummies, dtype=float),
+    ])
+
+
+def _full_bounds() -> list[tuple[float, float]]:
+    return [
+        KAPPA_BOUNDS, SIGMA_CHI_BOUNDS, SIGMA_XI_BOUNDS, RHO_BOUNDS,
+        MU_XI_BOUNDS, MU_XI_STAR_BOUNDS, LAMBDA_CHI_BOUNDS,
+        EPSILON_BOUNDS, EPSILON_BOUNDS,
+    ] + [SEASONAL_BOUNDS] * 11
+
+
+_BOUNDED_PARAM_NAMES = (
+    "kappa", "sigma_chi", "sigma_xi", "rho",
+    "mu_xi", "mu_xi_star", "lambda_chi",
+    "epsilon_m", "epsilon_yr",
+)
+
+
+def _fit_from_obs(
+    obs: pd.DataFrame,
+    *,
+    initial_params: SSParams | None = None,
+    max_iter: int = 500,
+) -> SSFit:
+    """Bounded MLE on a long-format observation DataFrame.
+
+    Internal entry point used by :func:`fit` and by the synthetic-data
+    tests. ``obs`` must have the schema produced by :func:`prepare_observations`.
+    """
+    if len(obs) == 0:
+        raise ValueError("no observations after preparing OMIP / OMIE data")
+
+    if initial_params is None:
+        initial_params = SSParams(
+            kappa=1.0,
+            sigma_chi=0.30,
+            sigma_xi=0.15,
+            rho=0.0,
+            mu_xi=0.0,
+            mu_xi_star=0.0,
+            lambda_chi=0.0,
+            epsilon_m=0.02,
+            epsilon_yr=0.05,
+            seasonal_dummies=np.zeros(11),
+        )
+
+    bounds = _full_bounds()
+    x0 = _vec_from_params(initial_params)
+    for i, (lo, hi) in enumerate(bounds):
+        x0[i] = float(np.clip(x0[i], lo + 1e-6, hi - 1e-6))
+
+    def neg_log_lik(vec: np.ndarray) -> float:
+        try:
+            cand = _params_from_vec(vec)
+            res = _kalman_filter(obs, cand, return_states=False)
+            ll = res["log_likelihood"]
+            if not np.isfinite(ll):
+                return 1e12
+            return -ll
+        except (RuntimeError, np.linalg.LinAlgError, ValueError):
+            return 1e12
+
+    result = minimize(
+        neg_log_lik, x0, method="L-BFGS-B", bounds=bounds,
+        options={"maxiter": max_iter},
+    )
+    if not result.success:
+        raise RuntimeError(f"Schwartz-Smith MLE did not converge: {result.message}")
+
+    tol = 1e-3
+    for i, name in enumerate(_BOUNDED_PARAM_NAMES):
+        lo, hi = bounds[i]
+        v = result.x[i]
+        if abs(v - lo) < tol:
+            raise RuntimeError(
+                f"MLE: {name}={v:.6f} hit lower bound {lo}; widen the bound "
+                "or revisit the model spec."
+            )
+        if abs(v - hi) < tol:
+            raise RuntimeError(
+                f"MLE: {name}={v:.6f} hit upper bound {hi}; widen the bound "
+                "or revisit the model spec."
+            )
+
+    fitted_params = _params_from_vec(result.x)
+    final = _kalman_filter(obs, fitted_params, return_states=True)
+    return SSFit(
+        params=fitted_params,
+        trade_dates=pd.DatetimeIndex(sorted(obs["trade_date"].unique())),
+        state_chi=final["chi_series"],
+        state_xi=final["xi_series"],
+        state_cov=final["cov_array"],
+        log_likelihood=final["log_likelihood"],
+        n_obs=final["n_obs"],
+        n_dates=final["n_dates"],
+        rmse_log_m=final["rmse_log_m"],
+        rmse_log_yr=final["rmse_log_yr"],
+    )
+
+
 def fit(
     omip_forward: pd.DataFrame,
-    omie_daily_mean: pd.Series,
+    omie_daily_mean: pd.Series | None = None,
+    *,
+    initial_params: SSParams | None = None,
+    max_iter: int = 500,
 ) -> SSFit:
-    """Fit the Schwartz-Smith model to OMIP forward data, anchored by
-    daily-mean OMIE spot. Implementation in commits H2 (Kalman filter)
-    and H3 (bounded MLE).
+    """Fit the Schwartz-Smith model by Kalman + bounded MLE.
+
+    Parameters
+    ----------
+    omip_forward
+        Curated OMIP forward DataFrame (wide format, one row per
+        (trade_date, contract)).
+    omie_daily_mean
+        Daily-mean OMIE spot indexed by trade date. Used as a SPOT
+        pseudo-observation in the Kalman filter — see :func:`prepare_observations`.
+    initial_params
+        Warm-start; if ``None`` the function builds a generic interior
+        guess.
+    max_iter
+        Maximum iterations of scipy L-BFGS-B.
+
+    Raises ``RuntimeError`` on optimiser non-convergence or if any of
+    the nine numerical parameters touches its bound at the optimum.
     """
-    raise NotImplementedError("forward.fit is implemented across commits H2 + H3")
+    obs = prepare_observations(omip_forward, omie_daily_mean)
+    return _fit_from_obs(obs, initial_params=initial_params, max_iter=max_iter)
 
 
 def simulate(
@@ -576,9 +722,88 @@ def simulate(
     *,
     seed: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Simulate (chi, xi) daily-step paths under the physical measure.
+    """Simulate ``(chi, xi)`` daily-step paths under the physical measure.
 
-    Returns ``(chi_paths, xi_paths)`` both shape ``(n_paths, n_days)``.
-    Implementation in commit H4.
+    Returns two arrays of shape ``(n_paths, n_days)`` carrying the
+    simulated short-term factor and long-term factor. The discretisation
+    is exact for the OU + correlated-BM pair at a one-day step
+    ``dt = 1 / DAYS_PER_YEAR``:
+
+        chi_{t+1} = exp(-kappa·dt) · chi_t + eta_chi
+        xi_{t+1}  = xi_t + mu_xi · dt + eta_xi
+        (eta_chi, eta_xi) ~ N(0, Q)
+        Q_11 = sigma_chi^2 · (1 - exp(-2 kappa dt)) / (2 kappa)
+        Q_22 = sigma_xi^2 · dt
+        Q_12 = rho · sigma_chi · sigma_xi · (1 - exp(-kappa dt)) / kappa
     """
-    raise NotImplementedError("forward.simulate is implemented in commit H4")
+    if n_days <= 0 or n_paths <= 0:
+        raise ValueError("n_days and n_paths must be positive")
+
+    rng = np.random.default_rng(seed=seed)
+    dt = 1.0 / DAYS_PER_YEAR
+    kappa = params.kappa
+    sigma_chi = params.sigma_chi
+    sigma_xi = params.sigma_xi
+    rho = params.rho
+    mu_xi = params.mu_xi
+
+    phi = float(np.exp(-kappa * dt))
+    q11 = sigma_chi**2 * (1.0 - np.exp(-2.0 * kappa * dt)) / (2.0 * kappa)
+    q22 = sigma_xi**2 * dt
+    q12 = rho * sigma_chi * sigma_xi * (1.0 - np.exp(-kappa * dt)) / kappa
+    Q = np.array([[q11, q12], [q12, q22]])
+    # Cholesky requires Q strictly positive definite. Add tiny jitter so a
+    # caller passing sigma_chi=0 or sigma_xi=0 (zero-noise mode for tests
+    # and what-ifs) does not break the decomposition.
+    jitter = 1e-12
+    Q_jittered = Q + jitter * np.eye(2)
+    L = np.linalg.cholesky(Q_jittered)
+
+    chi = np.empty((n_paths, n_days))
+    xi = np.empty((n_paths, n_days))
+    chi[:, 0] = initial_chi
+    xi[:, 0] = initial_xi
+    innov = rng.standard_normal((n_paths, n_days, 2))
+    correlated = innov @ L.T  # shape (n_paths, n_days, 2)
+    for t in range(1, n_days):
+        chi[:, t] = phi * chi[:, t - 1] + correlated[:, t, 0]
+        xi[:, t] = xi[:, t - 1] + mu_xi * dt + correlated[:, t, 1]
+    return chi, xi
+
+
+def implied_forward_curve(
+    params: SSParams,
+    chi: float,
+    xi: float,
+    tau_grid: np.ndarray,
+    *,
+    delivery_months: np.ndarray | None = None,
+    is_yearly: np.ndarray | None = None,
+) -> np.ndarray:
+    """Vectorised closed-form log F(t, T) for a grid of maturities.
+
+    ``tau_grid``: years to maturity, shape (M,).
+    ``delivery_months``: int array in [1, 12] for monthly contracts;
+        ignored where ``is_yearly`` is True.
+    ``is_yearly``: bool array; same shape as tau_grid.
+    """
+    tau_grid = np.asarray(tau_grid, dtype=float)
+    m = len(tau_grid)
+    if is_yearly is None:
+        is_yearly = np.zeros(m, dtype=bool)
+    if delivery_months is None:
+        delivery_months = np.ones(m, dtype=int)
+    a_vals = np.asarray(A_function(
+        tau_grid,
+        kappa=params.kappa, sigma_chi=params.sigma_chi,
+        sigma_xi=params.sigma_xi, rho=params.rho,
+        mu_xi_star=params.mu_xi_star, lambda_chi=params.lambda_chi,
+    ))
+    s_vals = np.empty(m)
+    for i in range(m):
+        if bool(is_yearly[i]):
+            s_vals[i] = _seasonal_yearly(params.seasonal_dummies)
+        else:
+            s_vals[i] = _seasonal_value(params.seasonal_dummies, int(delivery_months[i]))
+    e_neg_kt = np.exp(-params.kappa * tau_grid)
+    return e_neg_kt * chi + xi + a_vals + s_vals

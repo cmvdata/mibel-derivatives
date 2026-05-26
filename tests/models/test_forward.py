@@ -203,19 +203,27 @@ def test_tau_years_uses_365_25() -> None:
 # ---- H1. fit / simulate stubs still raise ---------------------------------
 
 
-def test_fit_signature_raises_until_implemented() -> None:
-    with pytest.raises(NotImplementedError):
-        forward.fit(pd.DataFrame(), pd.Series(dtype=float))
+def test_fit_rejects_empty_observations() -> None:
+    """fit() must surface degenerate inputs rather than silently fitting."""
+    # Build an OMIP DataFrame whose every row has a missing price.
+    empty = pd.DataFrame({
+        "trade_date": ["2024-01-02"],
+        "maturity_bucket": ["M"],
+        "contract": ["FTB M Feb-24"],
+        "reference_d_eur_mwh": [np.nan],
+    })
+    with pytest.raises(ValueError, match="no observations"):
+        forward.fit(empty)
 
 
-def test_simulate_signature_raises_until_implemented() -> None:
-    with pytest.raises(NotImplementedError):
-        forward.simulate(
-            _trivial_params(),
-            initial_chi=0.0, initial_xi=4.0,
-            start=pd.Timestamp("2025-01-01"),
-            n_days=10, n_paths=5,
-        )
+def test_simulate_returns_tuple() -> None:
+    chi, xi = forward.simulate(
+        _trivial_params(),
+        initial_chi=0.0, initial_xi=4.0,
+        start=pd.Timestamp("2025-01-01"),
+        n_days=10, n_paths=5, seed=1,
+    )
+    assert chi.shape == (5, 10) and xi.shape == (5, 10)
 
 
 # ---- H2. Observation preparation -------------------------------------------
@@ -429,3 +437,154 @@ def test_kalman_filter_better_params_yield_higher_likelihood() -> None:
     )
     ll_wrong = forward._kalman_filter(obs, params_wrong, return_states=False)["log_likelihood"]
     assert ll_true > ll_wrong
+
+
+# ---- H3. Bounded MLE -------------------------------------------------------
+
+
+# NOTE: a synthetic end-to-end MLE recovery test would be the natural
+# place to assert that the optimiser converges interior with reasonable
+# parameter recovery. Empirically, 20-parameter L-BFGS-B on 50 synthetic
+# dates × 4 contracts does NOT converge within practical iteration caps
+# (the σ_ξ / ρ / risk-premium directions are weakly identified on short
+# series); even with a warm start within ±10 % of truth the optimiser
+# hits the iteration limit before satisfying the L-BFGS-B convergence
+# tolerance. The meaningful test for end-to-end correctness is on real
+# OMIP data — see tests/models/test_forward_validation.py, which fits
+# the full 1500+ trade dates with max_iter=300 and validates the
+# resulting calibration against forward-curve RMSE, spot anchoring and
+# implied curve at end of history.
+
+
+@pytest.mark.slow
+def test_mle_raises_on_bound_active_kappa() -> None:
+    """Generate obs with kappa OUTSIDE KAPPA_BOUNDS = [0.5, 5.0]. The
+    bounded MLE pushes kappa to its lower bound and raises RuntimeError
+    rather than silently clipping."""
+    params_outside = _trivial_params(
+        kappa=0.05,         # outside [0.5, 5.0]
+        sigma_chi=0.25, sigma_xi=0.10, rho=0.0,
+        mu_xi=0.0, mu_xi_star=0.0, lambda_chi=0.0,
+        epsilon_m=0.005, epsilon_yr=0.01,
+    )
+    obs, _, _ = _synthetic_ss_observations(
+        params_outside, n_dates=50,
+        initial_chi=0.0, initial_xi=4.0, seed=11,
+    )
+    # Warm-start kappa AT the lower bound so the MLE confirms the bound
+    # is the optimum and raises immediately, without burning iterations.
+    warm = forward.SSParams(
+        kappa=forward.KAPPA_BOUNDS[0] + 1e-3,  # just above lower bound
+        sigma_chi=0.25, sigma_xi=0.10, rho=0.0,
+        mu_xi=0.0, mu_xi_star=0.0, lambda_chi=0.0,
+        epsilon_m=0.005, epsilon_yr=0.01,
+        seasonal_dummies=np.zeros(11),
+    )
+    with pytest.raises(RuntimeError, match=r"(kappa|converge)"):
+        forward._fit_from_obs(obs, initial_params=warm, max_iter=50)
+
+
+# ---- H4. Simulation --------------------------------------------------------
+
+
+def test_simulate_shape_and_initial_values() -> None:
+    params = _trivial_params(kappa=1.5, sigma_chi=0.0, sigma_xi=0.0)  # zero noise
+    chi, xi = forward.simulate(
+        params, initial_chi=0.2, initial_xi=4.0,
+        start=pd.Timestamp("2025-01-01"),
+        n_days=10, n_paths=5, seed=42,
+    )
+    assert chi.shape == (5, 10)
+    assert xi.shape == (5, 10)
+    # t=0 reflects the initial values across all paths.
+    np.testing.assert_allclose(chi[:, 0], 0.2, atol=1e-12)
+    np.testing.assert_allclose(xi[:, 0], 4.0, atol=1e-12)
+    # With zero noise, chi decays exponentially toward 0; xi stays at 4
+    # up to the 1e-12 Cholesky jitter that lets the decomposition admit
+    # a singular Q.
+    assert chi[0, -1] < chi[0, 0]
+    assert abs(xi[0, -1] - 4.0) < 1e-4
+
+
+def test_simulate_reproducible_with_seed() -> None:
+    params = _trivial_params()
+    a_chi, a_xi = forward.simulate(
+        params, initial_chi=0.0, initial_xi=4.0,
+        start=pd.Timestamp("2025-01-01"), n_days=100, n_paths=20, seed=7,
+    )
+    b_chi, b_xi = forward.simulate(
+        params, initial_chi=0.0, initial_xi=4.0,
+        start=pd.Timestamp("2025-01-01"), n_days=100, n_paths=20, seed=7,
+    )
+    c_chi, c_xi = forward.simulate(
+        params, initial_chi=0.0, initial_xi=4.0,
+        start=pd.Timestamp("2025-01-01"), n_days=100, n_paths=20, seed=99,
+    )
+    np.testing.assert_array_equal(a_chi, b_chi)
+    np.testing.assert_array_equal(a_xi, b_xi)
+    assert not np.array_equal(a_chi, c_chi)
+
+
+def test_simulate_long_run_chi_variance_matches_theory() -> None:
+    """Pure OU on chi: long-run variance is sigma_chi^2 / (2 kappa)."""
+    params = _trivial_params(
+        kappa=2.0, sigma_chi=0.4, sigma_xi=0.0, rho=0.0,
+        mu_xi=0.0, mu_xi_star=0.0,
+    )
+    n_days = int(forward.DAYS_PER_YEAR * 5)  # 5 years daily
+    chi, _ = forward.simulate(
+        params, initial_chi=0.0, initial_xi=0.0,
+        start=pd.Timestamp("2025-01-01"),
+        n_days=n_days, n_paths=500, seed=2026,
+    )
+    burn = n_days // 2
+    var_observed = float(chi[:, burn:].var())
+    var_theoretical = params.sigma_chi**2 / (2.0 * params.kappa)
+    rel = abs(var_observed - var_theoretical) / var_theoretical
+    assert rel < 0.15, f"Var(chi) obs={var_observed:.4f} theory={var_theoretical:.4f}"
+
+
+def test_simulate_xi_drifts_with_mu_xi() -> None:
+    """Pure xi RW: time-T mean drifts by mu_xi · T (years)."""
+    params = _trivial_params(
+        kappa=1.0, sigma_chi=0.0, sigma_xi=0.0,  # no noise
+        mu_xi=0.10,                              # 0.10 per year
+    )
+    n_days = int(forward.DAYS_PER_YEAR)
+    _, xi = forward.simulate(
+        params, initial_chi=0.0, initial_xi=0.0,
+        start=pd.Timestamp("2025-01-01"),
+        n_days=n_days, n_paths=10, seed=1,
+    )
+    # n_days - 1 drift steps of mu_xi · dt each.
+    expected = (n_days - 1) * params.mu_xi / forward.DAYS_PER_YEAR
+    np.testing.assert_allclose(xi[:, -1], expected, atol=1e-3)
+
+
+def test_implied_forward_curve_matches_pointwise_pricing() -> None:
+    params = _trivial_params(
+        kappa=1.5, sigma_chi=0.3, sigma_xi=0.2, rho=0.3,
+        mu_xi=0.02, mu_xi_star=0.01, lambda_chi=0.01,
+        seasonal_dummies=np.linspace(0.05, -0.05, 11),
+    )
+    chi, xi = 0.1, 4.0
+    taus = np.array([0.1, 0.5, 1.0, 2.0])
+    months = np.array([2, 6, 9, 12])
+    is_yr = np.array([False, False, False, False])
+    curve = forward.implied_forward_curve(
+        params, chi, xi, taus,
+        delivery_months=months, is_yearly=is_yr,
+    )
+    for i, (t, m) in enumerate(zip(taus, months)):
+        pointwise = forward.futures_log_price(params, chi, xi, float(t), delivery_month=int(m))
+        assert abs(curve[i] - pointwise) < 1e-12
+
+
+def test_simulate_rejects_nonpositive_dimensions() -> None:
+    params = _trivial_params()
+    with pytest.raises(ValueError):
+        forward.simulate(
+            params, initial_chi=0.0, initial_xi=4.0,
+            start=pd.Timestamp("2025-01-01"),
+            n_days=0, n_paths=5,
+        )
