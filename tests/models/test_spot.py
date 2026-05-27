@@ -823,6 +823,61 @@ def test_simulate_initial_theta_propagates_to_t0() -> None:
     np.testing.assert_allclose(b[:, 0], np.exp(2.0) - 10.0, atol=1e-9)
 
 
+def test_fit_with_forward_anchor_consumes_ss_state(monkeypatch) -> None:
+    """Pieza 1 fit consuming a Pieza 2 SSFit produces a SpotModelFit
+    whose theta_series tracks (chi + xi + s_delivery) from Pieza 2,
+    not an EMA of log(P+c)."""
+    from types import SimpleNamespace
+    rng = np.random.default_rng(seed=2026)
+    n_hours = 24 * 90  # 90 days of hourly
+    idx = _hourly_utc("2024-01-01", n_hours)
+    daily_idx = pd.date_range("2024-01-01", periods=90, freq="D")
+
+    # Fake Pieza 2 daily state: linear ramp in xi, zero chi.
+    chi_d = pd.Series(np.zeros(90), index=daily_idx, name="chi")
+    xi_d = pd.Series(np.linspace(4.0, 4.2, 90), index=daily_idx, name="xi")
+    seasonal_dummies = np.array([0.05, 0.02, -0.01, -0.04, -0.03, 0.0,
+                                  0.02, 0.04, 0.06, 0.08, 0.10])
+    ss_fit = SimpleNamespace(
+        state_chi=chi_d,
+        state_xi=xi_d,
+        params=SimpleNamespace(
+            kappa=1.5,
+            sigma_xi=0.1,
+            seasonal_dummies=seasonal_dummies,
+        ),
+    )
+
+    # Build synthetic hourly prices = theta + s_delivery + OU(kappa,sigma) + noise.
+    months = pd.DatetimeIndex(idx).month.to_numpy()
+    s_lookup = np.concatenate([[0.0, 0.0], seasonal_dummies])
+    s_delivery = s_lookup[months]
+    theta_hourly_vals = xi_d.reindex(
+        pd.DatetimeIndex(idx).tz_convert(None).normalize(),
+        method="ffill",
+    ).set_axis(idx).values
+    kappa_test, sigma_test = 0.10, 0.05
+    phi = float(np.exp(-kappa_test))
+    factor = float(np.sqrt((1 - phi**2) / (2 * kappa_test)))
+    z = np.zeros(n_hours)
+    for t in range(1, n_hours):
+        z[t] = phi * z[t - 1] + sigma_test * factor * rng.standard_normal()
+    log_p_target = theta_hourly_vals + s_delivery + z
+    prices = pd.Series(
+        np.exp(log_p_target) - spot.PRICE_SHIFT, index=idx, name="p",
+    )
+
+    fit = spot.fit_with_forward_anchor(prices, ss_fit)
+    # theta_series should follow xi_d (plus s_delivery shift) — its
+    # last value approximates last xi + last seasonal.
+    expected_last = xi_d.iloc[-1] + s_lookup[idx[-1].month]
+    assert abs(fit.theta_series.iloc[-1] - expected_last) < 0.05
+    # ema_span = 0 signals forward-anchored mode.
+    assert fit.params.ema_span == 0
+    # Slow factor surfaced from Pieza 2 (kappa = ss_fit.params.kappa).
+    assert fit.params.slow_factor.kappa == 1.5
+
+
 def test_simulate_seasonal_profile_appears_in_paths() -> None:
     """Strong HoD seasonality must show up as an hour-of-day price profile
     when averaged across many paths."""

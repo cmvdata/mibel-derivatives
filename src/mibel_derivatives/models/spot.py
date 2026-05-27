@@ -348,6 +348,143 @@ def fit(
     )
 
 
+def fit_with_forward_anchor(
+    prices: pd.Series,
+    ss_fit,  # forward.SSFit — typed loose to avoid circular import
+    *,
+    price_shift: float = PRICE_SHIFT,
+    fourier_harmonics: int = FOURIER_HARMONICS,
+    jump_k_base: float = JUMP_THRESHOLD_K_BASE,
+    jump_k_peak: float = JUMP_THRESHOLD_K_PEAK,
+    jump_peak_hours: tuple[int, ...] = JUMP_PEAK_HOURS_UTC,
+    jump_amplitude_min: float = JUMP_AMPLITUDE_MIN,
+    jump_max_iter: int = JUMP_MAX_ITER,
+) -> SpotModelFit:
+    """Fit Pieza 1 using Pieza 2's (chi_t + xi_t + s_delivery(t)) as the
+    slow factor instead of the standalone EMA.
+
+    Used for derivative valuations that need OMIP forward-curve
+    consistency: the spot path is reconstructed as
+
+        log(P_t + c) = chi_{date(t)} + xi_{date(t)} + s_delivery(t)
+                     + s_intraday(t) + Z_t
+
+    where (chi_t, xi_t) come from the Schwartz-Smith Kalman fit (Pieza 2,
+    daily resolution) and (s_intraday, Z_t) are the Pieza 1 intraday +
+    fast layer fit on the residual after subtracting the Pieza 2
+    contribution.
+
+    The Pieza 2 daily state is broadcast to hourly using forward-fill:
+    each hour of trade date d inherits theta_d = chi_d + xi_d, then the
+    delivery-month seasonal s_delivery is added based on the calendar
+    month of that hour.
+
+    Inputs
+    ------
+    prices
+        UTC-hourly nominal day-ahead prices, same shape requirement as
+        :func:`fit`.
+    ss_fit
+        ``forward.SSFit`` from Pieza 2 calibration.
+    """
+    s = prices.dropna().astype(float)
+    if s.index.tz is None:
+        raise ValueError("prices must have a UTC-tz-aware DatetimeIndex")
+    if not s.index.is_monotonic_increasing:
+        s = s.sort_index()
+
+    log_p = np.log(s + price_shift).rename("log_p")
+
+    # Forward-anchor theta: Pieza 2 daily state broadcast to hourly.
+    ss_daily_theta = ss_fit.state_chi + ss_fit.state_xi
+    # Align ss daily index (tz-naive midnight UTC) with hourly UTC log_p.
+    daily_index_naive = pd.DatetimeIndex(ss_daily_theta.index).tz_localize(None)
+    daily_theta_naive = pd.Series(
+        ss_daily_theta.values, index=daily_index_naive, name="theta_daily",
+    )
+    log_p_dates = pd.DatetimeIndex(log_p.index).tz_convert(None).normalize()
+    theta_hourly = (
+        daily_theta_naive.reindex(log_p_dates, method="ffill")
+        .set_axis(log_p.index)
+        .rename("theta")
+    )
+    if theta_hourly.isna().any():
+        raise ValueError(
+            "Pieza 2 SSFit does not cover the prices window — "
+            "extend the ss_fit or restrict the prices."
+        )
+
+    # Add delivery-month seasonal s(T) from Pieza 2 to theta (so the
+    # Pieza 1 seasonal layer below absorbs only the residual cycle).
+    months_hourly = pd.DatetimeIndex(log_p.index).month.to_numpy()
+    monthly_seasonal = np.empty(13, dtype=float)
+    monthly_seasonal[0] = 0.0
+    monthly_seasonal[1] = 0.0  # Jan reference
+    monthly_seasonal[2:13] = np.asarray(ss_fit.params.seasonal_dummies)
+    s_delivery = pd.Series(
+        monthly_seasonal[months_hourly], index=log_p.index, name="s_delivery",
+    )
+    theta_full = (theta_hourly + s_delivery).rename("theta")
+
+    x_series = (log_p - theta_full).rename("x")
+
+    seasonality, seasonal_fitted = _fit_seasonality(
+        x_series, harmonics=fourier_harmonics,
+    )
+    residuals = (x_series - seasonal_fitted).rename("residuals")
+    residual_returns = residuals.diff().dropna().rename("residual_returns")
+    jumps_mask = _detect_jumps(
+        residual_returns,
+        k_base=jump_k_base, k_peak=jump_k_peak,
+        peak_hours=jump_peak_hours,
+        amplitude_min=jump_amplitude_min,
+        max_iter=jump_max_iter,
+    )
+    jump_sizes = residual_returns[jumps_mask].rename("jump_sizes")
+
+    kappa, sigma_by_hour = _mle_ou(residuals, jumps_mask)
+    intensity, p_up, eta_up, eta_down = _mle_jumps(
+        jump_sizes, n_total_hours=len(residual_returns),
+    )
+
+    # The slow factor in the params is INHERITED from Pieza 2; we
+    # surface it through SlowFactorParams (kappa = ss_fit.params.kappa,
+    # mean = mean of theta_daily, sigma = sigma_xi for the long-term
+    # diffusion). Used by simulate() if the caller wants standalone
+    # forward simulation; for OMIP-consistent valuation, use Pieza 2's
+    # state path directly.
+    slow_factor = SlowFactorParams(
+        kappa=float(ss_fit.params.kappa),
+        mean=float(ss_daily_theta.mean()),
+        sigma=float(ss_fit.params.sigma_xi),
+    )
+    params = SpotModelParams(
+        seasonality=seasonality,
+        slow_factor=slow_factor,
+        price_shift=price_shift,
+        ema_span=0,  # signals "Pieza 2-anchored, no EMA"
+        kappa=kappa,
+        sigma_by_hour=sigma_by_hour,
+        jump_intensity=intensity,
+        jump_p_up=p_up,
+        jump_eta_up=eta_up,
+        jump_eta_down=eta_down,
+    )
+    return SpotModelFit(
+        params=params,
+        log_price_index=s.index,
+        theta_series=theta_full,
+        x_series=x_series,
+        seasonal_fitted=seasonal_fitted,
+        residuals=residuals,
+        residual_returns=residual_returns,
+        jumps_mask=jumps_mask,
+        jump_sizes=jump_sizes,
+        n_obs=len(s),
+        n_jumps=int(jumps_mask.sum()),
+    )
+
+
 def simulate(
     params: SpotModelParams,
     start: pd.Timestamp,
