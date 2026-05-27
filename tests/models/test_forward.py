@@ -25,7 +25,7 @@ def test_module_exposes_public_api() -> None:
         "delivery_midpoint", "tau_years",
         "KAPPA_BOUNDS", "SIGMA_CHI_BOUNDS", "SIGMA_XI_BOUNDS",
         "RHO_BOUNDS", "MU_XI_STAR_BOUNDS", "LAMBDA_CHI_BOUNDS",
-        "EPSILON_BOUNDS", "DAYS_PER_YEAR",
+        "EPSILON_BOUNDS", "EPSILON_SPOT_BOUNDS", "DAYS_PER_YEAR",
     ):
         assert hasattr(forward, name), f"forward.{name} missing"
     assert forward.DAYS_PER_YEAR == 365.25
@@ -44,6 +44,7 @@ def _trivial_params(**overrides) -> forward.SSParams:
         lambda_chi=overrides.get("lambda_chi", 0.0),
         epsilon_m=overrides.get("epsilon_m", 0.02),
         epsilon_yr=overrides.get("epsilon_yr", 0.03),
+        epsilon_spot=overrides.get("epsilon_spot", 0.005),
         seasonal_dummies=overrides.get("seasonal_dummies", np.zeros(11)),
     )
 
@@ -477,7 +478,7 @@ def test_mle_raises_on_bound_active_kappa() -> None:
         kappa=forward.KAPPA_BOUNDS[0] + 1e-3,  # just above lower bound
         sigma_chi=0.25, sigma_xi=0.10, rho=0.0,
         mu_xi=0.0, mu_xi_star=0.0, lambda_chi=0.0,
-        epsilon_m=0.005, epsilon_yr=0.01,
+        epsilon_m=0.005, epsilon_yr=0.01, epsilon_spot=0.005,
         seasonal_dummies=np.zeros(11),
     )
     with pytest.raises(RuntimeError, match=r"(kappa|converge)"):

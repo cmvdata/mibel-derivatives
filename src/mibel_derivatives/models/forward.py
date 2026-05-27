@@ -83,7 +83,8 @@ RHO_BOUNDS: tuple[float, float] = (-0.99, 0.99)
 MU_XI_BOUNDS: tuple[float, float] = (-0.50, 0.50)         # physical drift, per year
 MU_XI_STAR_BOUNDS: tuple[float, float] = (-0.50, 0.50)    # risk-neutral drift, per year
 LAMBDA_CHI_BOUNDS: tuple[float, float] = (-0.50, 0.50)    # short-term risk premium, per year
-EPSILON_BOUNDS: tuple[float, float] = (1e-4, 0.50)        # measurement noise std
+EPSILON_BOUNDS: tuple[float, float] = (1e-4, 0.50)        # measurement noise std (M, YR)
+EPSILON_SPOT_BOUNDS: tuple[float, float] = (1e-5, 0.05)   # spot anchor noise; tight by design
 
 # Year length used in T-t conversion.
 DAYS_PER_YEAR: float = 365.25
@@ -125,6 +126,7 @@ class SSParams:
     lambda_chi: float
     epsilon_m: float
     epsilon_yr: float
+    epsilon_spot: float
     seasonal_dummies: np.ndarray  # shape (11,), Feb..Dec; January is reference (0)
 
 
@@ -426,10 +428,19 @@ def _build_measurement_matrices(
     )
 
     d = a_vals + s_vals
+    # Three measurement-noise levels: epsilon_yr for YR contracts,
+    # epsilon_spot (tight, ~10^-3) for the SPOT anchor row, and
+    # epsilon_m for M contracts. Encoded as nested np.where so the
+    # mask hierarchy resolves cleanly even when buckets overlap.
+    is_spot_bucket = day_arrays["is_spot_bucket"]
     R = np.where(
         is_yr_bucket,
         params.epsilon_yr ** 2,
-        params.epsilon_m ** 2,
+        np.where(
+            is_spot_bucket,
+            params.epsilon_spot ** 2,
+            params.epsilon_m ** 2,
+        ),
     )
     return H, d, R
 
@@ -646,7 +657,8 @@ def _params_from_vec(x: np.ndarray) -> SSParams:
         lambda_chi=float(x[6]),
         epsilon_m=float(x[7]),
         epsilon_yr=float(x[8]),
-        seasonal_dummies=np.asarray(x[9:20], dtype=float),
+        epsilon_spot=float(x[9]),
+        seasonal_dummies=np.asarray(x[10:21], dtype=float),
     )
 
 
@@ -655,7 +667,7 @@ def _vec_from_params(p: SSParams) -> np.ndarray:
         np.array([
             p.kappa, p.sigma_chi, p.sigma_xi, p.rho,
             p.mu_xi, p.mu_xi_star, p.lambda_chi,
-            p.epsilon_m, p.epsilon_yr,
+            p.epsilon_m, p.epsilon_yr, p.epsilon_spot,
         ]),
         np.asarray(p.seasonal_dummies, dtype=float),
     ])
@@ -665,14 +677,14 @@ def _full_bounds() -> list[tuple[float, float]]:
     return [
         KAPPA_BOUNDS, SIGMA_CHI_BOUNDS, SIGMA_XI_BOUNDS, RHO_BOUNDS,
         MU_XI_BOUNDS, MU_XI_STAR_BOUNDS, LAMBDA_CHI_BOUNDS,
-        EPSILON_BOUNDS, EPSILON_BOUNDS,
+        EPSILON_BOUNDS, EPSILON_BOUNDS, EPSILON_SPOT_BOUNDS,
     ] + [SEASONAL_BOUNDS] * 11
 
 
 _BOUNDED_PARAM_NAMES = (
     "kappa", "sigma_chi", "sigma_xi", "rho",
     "mu_xi", "mu_xi_star", "lambda_chi",
-    "epsilon_m", "epsilon_yr",
+    "epsilon_m", "epsilon_yr", "epsilon_spot",
 )
 
 
@@ -693,6 +705,8 @@ def _fit_from_obs(
     if initial_params is None:
         # Warm-start near electricity-MIBEL empirical ranges (commodity
         # vols are an order of magnitude above stock-index defaults).
+        # epsilon_spot is held tight by construction so the spot anchor
+        # row dominates the Kalman gain at T=0.
         initial_params = SSParams(
             kappa=1.5,
             sigma_chi=1.0,
@@ -703,6 +717,7 @@ def _fit_from_obs(
             lambda_chi=0.0,
             epsilon_m=0.05,
             epsilon_yr=0.10,
+            epsilon_spot=0.005,
             seasonal_dummies=np.zeros(11),
         )
 

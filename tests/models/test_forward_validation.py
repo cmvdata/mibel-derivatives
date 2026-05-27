@@ -84,6 +84,7 @@ def test_calibrated_params_inside_bounds(omip_fit: forward.SSFit) -> None:
     assert forward.LAMBDA_CHI_BOUNDS[0] < p.lambda_chi < forward.LAMBDA_CHI_BOUNDS[1]
     assert forward.EPSILON_BOUNDS[0] < p.epsilon_m < forward.EPSILON_BOUNDS[1]
     assert forward.EPSILON_BOUNDS[0] < p.epsilon_yr < forward.EPSILON_BOUNDS[1]
+    assert forward.EPSILON_SPOT_BOUNDS[0] < p.epsilon_spot < forward.EPSILON_SPOT_BOUNDS[1]
 
 
 @pytest.mark.slow
