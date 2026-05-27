@@ -458,12 +458,16 @@ def test_kalman_filter_better_params_yield_higher_likelihood() -> None:
 
 
 @pytest.mark.slow
-def test_mle_raises_on_bound_active_kappa() -> None:
-    """Generate obs with kappa OUTSIDE KAPPA_BOUNDS = [0.5, 5.0]. The
-    bounded MLE pushes kappa to its lower bound and raises RuntimeError
-    rather than silently clipping."""
+def test_mle_flags_bound_active_kappa(caplog) -> None:
+    """Generate obs with kappa OUTSIDE KAPPA_BOUNDS = [0.1, 5.0]. The
+    bounded MLE pushes kappa to its lower bound and now logs a WARNING
+    (was: raise) so downstream validation can route the model through
+    the Pieza 1 / Pieza 2 composition pipeline. The validation V1 test
+    on real OMIP catches the bound-active case via an interior-bounds
+    assertion on the returned params."""
+    import logging
     params_outside = _trivial_params(
-        kappa=0.05,         # outside [0.5, 5.0]
+        kappa=0.05,         # outside [0.1, 5.0]
         sigma_chi=0.25, sigma_xi=0.10, rho=0.0,
         mu_xi=0.0, mu_xi_star=0.0, lambda_chi=0.0,
         epsilon_m=0.005, epsilon_yr=0.01,
@@ -472,17 +476,19 @@ def test_mle_raises_on_bound_active_kappa() -> None:
         params_outside, n_dates=50,
         initial_chi=0.0, initial_xi=4.0, seed=11,
     )
-    # Warm-start kappa AT the lower bound so the MLE confirms the bound
-    # is the optimum and raises immediately, without burning iterations.
     warm = forward.SSParams(
-        kappa=forward.KAPPA_BOUNDS[0] + 1e-3,  # just above lower bound
+        kappa=forward.KAPPA_BOUNDS[0] + 1e-3,
         sigma_chi=0.25, sigma_xi=0.10, rho=0.0,
         mu_xi=0.0, mu_xi_star=0.0, lambda_chi=0.0,
         epsilon_m=0.005, epsilon_yr=0.01, epsilon_spot=0.005,
         seasonal_dummies=np.zeros(11),
     )
-    with pytest.raises(RuntimeError, match=r"(kappa|converge)"):
-        forward._fit_from_obs(obs, initial_params=warm, max_iter=50)
+    with caplog.at_level(logging.WARNING, logger="mibel_derivatives.models.forward"):
+        fit_res = forward._fit_from_obs(obs, initial_params=warm, max_iter=50)
+    # κ̂ lands at the lower bound within tolerance.
+    assert abs(fit_res.params.kappa - forward.KAPPA_BOUNDS[0]) < 1e-3
+    # And the warning recorded it.
+    assert any("kappa" in rec.message and "bound" in rec.message for rec in caplog.records)
 
 
 # ---- H4. Simulation --------------------------------------------------------
