@@ -13,7 +13,10 @@ from mibel_derivatives.data import _http, _paths, _provenance
 
 
 def test_paths_resolve_under_repo_root(tmp_path: Path) -> None:
-    assert _paths.ROOT.name == "Mibel_derivatives"
+    # ROOT is the repo root regardless of the checkout directory name
+    # (local clone vs CI runner use different folder names).
+    assert (_paths.ROOT / "pyproject.toml").is_file()
+    assert (_paths.ROOT / "src" / "mibel_derivatives").is_dir()
     assert _paths.RAW_DIR == _paths.DATA_DIR / "raw"
 
 
