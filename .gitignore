@@ -38,6 +38,10 @@ data/raw/
 data/staging/
 data/curated/
 data/_manifest.jsonl
+# Transient run logs (bulk_download.py, production-fit pod runs)
+data/_*.log
+data/_*.txt
+data/_*.pid
 !data/README.md
 
 # Reports/figures generated locally
