@@ -218,7 +218,7 @@ def parse_year(path: Path, config: PVConfig) -> pd.DataFrame:
     )
     df = df.rename(columns=_OUTPUT_COLUMNS)
     df["config"] = config.label
-    keep = ["config"] + list(_OUTPUT_COLUMNS.values())
+    keep = ["config", *list(_OUTPUT_COLUMNS.values())]
     return df.set_index("dt_utc").sort_index()[keep]
 
 

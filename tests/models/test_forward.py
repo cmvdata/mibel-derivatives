@@ -7,6 +7,8 @@ add Kalman filter, MLE and simulation tests.
 
 from __future__ import annotations
 
+from dataclasses import FrozenInstanceError
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -50,7 +52,7 @@ def _trivial_params(**overrides) -> forward.SSParams:
 
 def test_ssparams_is_frozen() -> None:
     p = _trivial_params()
-    with pytest.raises(Exception):
+    with pytest.raises(FrozenInstanceError):
         p.kappa = 2.0  # frozen dataclass
 
 
@@ -257,8 +259,8 @@ def test_prepare_observations_long_format_shape_and_columns() -> None:
     assert expected_cols.issubset(set(obs.columns))
     assert len(obs) == len(omip)
     # M contracts: bucket="M", is_yearly=False.
-    assert (obs.loc[obs["bucket"] == "M", "is_yearly"] == False).all()
-    assert (obs.loc[obs["bucket"] == "YR", "is_yearly"] == True).all()
+    assert not obs.loc[obs["bucket"] == "M", "is_yearly"].any()
+    assert obs.loc[obs["bucket"] == "YR", "is_yearly"].all()
     # tau values are positive.
     assert (obs["tau"] > 0).all()
     # log_F = ln(reference_d_eur_mwh) — total sum and individual values match.
@@ -522,7 +524,7 @@ def test_simulate_reproducible_with_seed() -> None:
         params, initial_chi=0.0, initial_xi=4.0,
         start=pd.Timestamp("2025-01-01"), n_days=100, n_paths=20, seed=7,
     )
-    c_chi, c_xi = forward.simulate(
+    c_chi, _ = forward.simulate(
         params, initial_chi=0.0, initial_xi=4.0,
         start=pd.Timestamp("2025-01-01"), n_days=100, n_paths=20, seed=99,
     )
@@ -581,7 +583,7 @@ def test_implied_forward_curve_matches_pointwise_pricing() -> None:
         params, chi, xi, taus,
         delivery_months=months, is_yearly=is_yr,
     )
-    for i, (t, m) in enumerate(zip(taus, months)):
+    for i, (t, m) in enumerate(zip(taus, months, strict=True)):
         pointwise = forward.futures_log_price(params, chi, xi, float(t), delivery_month=int(m))
         assert abs(curve[i] - pointwise) < 1e-12
 

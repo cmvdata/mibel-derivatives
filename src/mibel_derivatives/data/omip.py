@@ -183,10 +183,7 @@ def _split_contract_meta(text: str) -> dict[str, str | None]:
 
 def parse_page(html: str | bytes, trade_date: dt.date, maturity: str) -> pd.DataFrame:
     """Parse OMIP HTML to a typed DataFrame; one row per contract."""
-    if isinstance(html, bytes):
-        soup = BeautifulSoup(html, "lxml")
-    else:
-        soup = BeautifulSoup(html, "lxml")
+    soup = BeautifulSoup(html, "lxml")
     table = soup.find("table")
     if table is None:
         return pd.DataFrame()

@@ -7,6 +7,8 @@ calibration stage.
 
 from __future__ import annotations
 
+from dataclasses import FrozenInstanceError
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -77,7 +79,7 @@ def test_params_dataclass_is_frozen_and_constructs() -> None:
         jump_eta_up=2.0,
         jump_eta_down=2.0,
     )
-    with pytest.raises(Exception):
+    with pytest.raises(FrozenInstanceError):
         params.kappa = 0.2  # frozen dataclass
 
 
@@ -139,7 +141,7 @@ def test_seasonal_design_matrix_shape_and_intercept() -> None:
     X = spot._seasonal_design_matrix(idx, harmonics=4)
     # 1 intercept + 2*4 Fourier + 6 DoW + 23 HoD = 38 cols
     assert X.shape == (24 * 7, 38)
-    assert list(X.columns)[0] == "intercept"
+    assert next(iter(X.columns)) == "intercept"
     assert (X["intercept"] == 1.0).all()
     # Exactly one of {dow_1..dow_6} is non-zero per row (or all zero on Monday)
     dow_block = X[[f"dow_{d}" for d in range(1, 7)]].to_numpy()
@@ -403,7 +405,8 @@ def test_detect_jumps_peak_hour_threshold_lets_through_evening_spikes() -> None:
     rr = pd.Series(rng.standard_normal(n_hours) * 0.10, index=idx)
 
     # Inject a 0.50 jump at one peak hour (h20) and one off-peak (h04).
-    peak_loc = None; off_loc = None
+    peak_loc = None
+    off_loc = None
     for i, ts in enumerate(idx):
         if peak_loc is None and ts.hour == 20:
             rr.iloc[i] = 0.50
@@ -484,7 +487,7 @@ def _simulate_jump_diffusion_path(
     hours = np.asarray(idx.hour)
     phi = float(np.exp(-kappa))
     factor = np.sqrt((1.0 - phi**2) / (2.0 * kappa))
-    jump_at = dict(zip(jump_times.tolist(), jump_sizes.tolist()))
+    jump_at = dict(zip(jump_times.tolist(), jump_sizes.tolist(), strict=True))
     z = np.zeros(n_hours)
     for t in range(1, n_hours):
         z[t] = phi * z[t - 1] + sigma_by_hour[hours[t]] * factor * rng.standard_normal()

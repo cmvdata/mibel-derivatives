@@ -277,7 +277,6 @@ def fit(
 
     # Drop the EMA warm-up. Use post-warmup slices for every estimator,
     # but keep the full theta_series / x_series in the result for plots.
-    log_p_pw = log_p.iloc[ema_span:]
     x_series_pw = x_series.iloc[ema_span:]
 
     seasonality, seasonal_fitted_pw = _fit_seasonality(
@@ -644,11 +643,14 @@ def _fit_seasonality(
     beta, *_ = np.linalg.lstsq(X.to_numpy(), y, rcond=None)
 
     cursor = 0
-    intercept = float(beta[cursor]); cursor += 1
+    intercept = float(beta[cursor])
+    cursor += 1
     fourier_coefs = np.asarray(beta[cursor:cursor + 2 * harmonics]).copy()
     cursor += 2 * harmonics
-    dow_coefs = np.asarray(beta[cursor:cursor + 6]).copy(); cursor += 6
-    hod_coefs = np.asarray(beta[cursor:cursor + 23]).copy(); cursor += 23
+    dow_coefs = np.asarray(beta[cursor:cursor + 6]).copy()
+    cursor += 6
+    hod_coefs = np.asarray(beta[cursor:cursor + 23]).copy()
+    cursor += 23
     if cursor != len(beta):
         raise RuntimeError(
             f"Design matrix has {len(beta)} cols but slicing consumed {cursor}"
@@ -810,8 +812,6 @@ def _mle_ou(
 
     bounds = [kappa_bounds] + [(sigma_lower, None)] * 24
     x0 = np.concatenate([[kappa0], sigma0])
-
-    diff_innov = z_tp1_nj - 0.0  # placeholder; computed inside neg_log_lik
 
     def neg_log_lik(x: np.ndarray) -> float:
         kappa = x[0]

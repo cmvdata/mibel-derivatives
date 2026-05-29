@@ -563,8 +563,10 @@ def _kalman_filter_prepped(
     chi_arr = np.empty(n_dates) if return_states else None
     xi_arr = np.empty(n_dates) if return_states else None
     cov_arr = np.empty((n_dates, 4)) if return_states else None
-    sse_m = 0.0; n_m = 0
-    sse_yr = 0.0; n_yr = 0
+    sse_m = 0.0
+    n_m = 0
+    sse_yr = 0.0
+    n_yr = 0
 
     kappa = params.kappa
     sigma_chi = params.sigma_chi
