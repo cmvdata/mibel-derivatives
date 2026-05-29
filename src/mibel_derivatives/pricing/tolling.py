@@ -5,7 +5,7 @@ Specification (CONTEXT.md § Tolling agreement sobre Castejón I):
 Dispatch optimiser via dynamic programming over operating states
 (uncoupled, starting, technical minimum, optimal output, stopping) with
 temporal constraints (minimum up-time, minimum down-time). Valuation by
-Longstaff–Schwartz on the spark spread (S − HR · G − CO2_cost · ER),
+Longstaff-Schwartz on the spark spread (S - HR · G - CO2_cost · ER),
 honouring operating constraints.
 
 Asset parameters live in the asset_parameters table — see CONTEXT.md

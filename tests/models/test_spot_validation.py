@@ -4,7 +4,7 @@ These tests fit the model on the real curated OMIE day-ahead Spain
 series and assert that the calibrated parameters and forward simulation
 land where the spec (reespec 2026-05-24) demands. They are marked both
 ``slow`` and ``monte_carlo`` so they can be excluded from the fast CI
-path; the per-test wall is dominated by the 5 000-path × 8 760-hour
+path; the per-test wall is dominated by the 5 000-path x 8 760-hour
 simulation in tests 3 and 4 (~30-60 s each on a modern laptop).
 
 The tests skip themselves cleanly if the curated parquet is not on
@@ -46,18 +46,18 @@ def omie_fit(omie_hourly: pd.Series) -> spot.SpotModelFit:
 
 @pytest.mark.slow
 def test_calibrated_kappa_inside_bounds(omie_fit: spot.SpotModelFit) -> None:
-    """Spec test 1: κ̂ ∈ [KAPPA_BOUNDS_LO, KAPPA_BOUNDS_HI] = [0.05, 0.20]."""
+    """Spec test 1: kappâ ∈ [KAPPA_BOUNDS_LO, KAPPA_BOUNDS_HI] = [0.05, 0.20]."""
     k = omie_fit.params.kappa
     lo, hi = spot.KAPPA_BOUNDS
-    assert lo <= k <= hi, f"κ̂={k:.4f} outside [{lo}, {hi}]"
+    assert lo <= k <= hi, f"kappâ={k:.4f} outside [{lo}, {hi}]"
 
 
 @pytest.mark.slow
 def test_calibrated_lambda_inside_bounds(omie_fit: spot.SpotModelFit) -> None:
-    """Spec test 2: λ̂ ∈ [LAMBDA_BOUNDS_LO, LAMBDA_BOUNDS_HI] = [0.008, 0.025]."""
+    """Spec test 2: lambdâ ∈ [LAMBDA_BOUNDS_LO, LAMBDA_BOUNDS_HI] = [0.008, 0.025]."""
     lam = omie_fit.params.jump_intensity
     lo, hi = spot.LAMBDA_BOUNDS
-    assert lo <= lam <= hi, f"λ̂={lam:.5f} outside [{lo}, {hi}]"
+    assert lo <= lam <= hi, f"lambdâ={lam:.5f} outside [{lo}, {hi}]"
 
 
 @pytest.mark.slow
@@ -65,14 +65,14 @@ def test_calibrated_lambda_inside_bounds(omie_fit: spot.SpotModelFit) -> None:
 def test_simulation_p95_within_25pct_of_history(
     omie_hourly: pd.Series, omie_fit: spot.SpotModelFit,
 ) -> None:
-    """Spec test 3: simulate 5000 paths × 8760 h from the stationary
-    mean μ_θ; the empirical p95 of the simulated grid must lie within
+    """Spec test 3: simulate 5000 paths x 8760 h from the stationary
+    mean mu_theta; the empirical p95 of the simulated grid must lie within
     ±25 % of the historical p95 over 2019-2024.
 
     The tolerance was loosened from the original ±15 % on 2026-05-25
     after the validation run showed a structural floor at ≈ 21 %: the
     historical p95 = 218 EUR/MWh is dominated by the 2022 gas-crisis
-    regime (p95(2022) = 268, p95 of the other five years 52–254 with
+    regime (p95(2022) = 268, p95 of the other five years 52-254 with
     median ≈ 140), so a stationary-distribution model calibrated on
     the union cannot simultaneously match both regimes. The follow-up
     is the Schwartz-Smith fit in Pieza 2 which anchors to OMIP forward
@@ -80,7 +80,7 @@ def test_simulation_p95_within_25pct_of_history(
     reports/diagnostics/spot_model_calibration.md § Test 3 floor for
     the full discussion."""
     p = omie_fit.params
-    # The slow-OU stationary mean μ_θ is the natural starting point when
+    # The slow-OU stationary mean mu_theta is the natural starting point when
     # comparing against the *unconditional* historical distribution of
     # prices (tests 3 and 4 are spec'd against historical full-window
     # mean and p95). Starting from theta_series.iloc[-1] would project
@@ -105,10 +105,10 @@ def test_simulation_p95_within_25pct_of_history(
 def test_simulation_mean_within_20pct_of_history(
     omie_hourly: pd.Series, omie_fit: spot.SpotModelFit,
 ) -> None:
-    """Spec test 4: the mean of the simulated price grid over 1 year ×
+    """Spec test 4: the mean of the simulated price grid over 1 year x
     5000 paths must lie within ±20 % of the historical mean."""
     p = omie_fit.params
-    # The slow-OU stationary mean μ_θ is the natural starting point when
+    # The slow-OU stationary mean mu_theta is the natural starting point when
     # comparing against the *unconditional* historical distribution of
     # prices (tests 3 and 4 are spec'd against historical full-window
     # mean and p95). Starting from theta_series.iloc[-1] would project

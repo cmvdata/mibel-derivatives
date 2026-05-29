@@ -1,7 +1,7 @@
 """Tests for :mod:`mibel_derivatives.models.forward` (Schwartz-Smith).
 
 This file accumulates tests across commits H1-H4. Commit H1 covers
-closed-form pricing (A(τ) and futures_log_price); subsequent commits
+closed-form pricing (A(tau) and futures_log_price); subsequent commits
 add Kalman filter, MLE and simulation tests.
 """
 
@@ -56,11 +56,11 @@ def test_ssparams_is_frozen() -> None:
         p.kappa = 2.0  # frozen dataclass
 
 
-# ---- H1. A(τ) closed-form --------------------------------------------------
+# ---- H1. A(tau) closed-form --------------------------------------------------
 
 
 def test_A_function_zero_tau_is_zero() -> None:
-    """At τ=0 the deterministic correction is zero (no time elapsed)."""
+    """At tau=0 the deterministic correction is zero (no time elapsed)."""
     val = forward.A_function(
         0.0, kappa=1.0, sigma_chi=0.3, sigma_xi=0.2, rho=0.5,
         mu_xi_star=0.05, lambda_chi=0.02,
@@ -69,7 +69,7 @@ def test_A_function_zero_tau_is_zero() -> None:
 
 
 def test_A_function_no_uncertainty_no_premia_is_zero_drift_times_tau() -> None:
-    """With σ = 0 and zero risk premia, A(τ) = μ_ξ* · τ."""
+    """With sigma = 0 and zero risk premia, A(tau) = mu_xi* · tau."""
     tau = 2.5
     val = float(forward.A_function(
         tau, kappa=1.0, sigma_chi=0.0, sigma_xi=0.0, rho=0.0,
@@ -79,8 +79,8 @@ def test_A_function_no_uncertainty_no_premia_is_zero_drift_times_tau() -> None:
 
 
 def test_A_function_pure_long_term_variance_grows_linearly() -> None:
-    """σ_χ = 0 and λ_χ = 0 leave A(τ) = μ_ξ*·τ + 0.5 σ_ξ²·τ. Long-term
-    factor variance contributes a Jensen 1/2 σ² term linear in τ."""
+    """sigma_chi = 0 and lambda_chi = 0 leave A(tau) = mu_xi*·tau + 0.5 sigma_xi²·tau. Long-term
+    factor variance contributes a Jensen 1/2 sigma² term linear in tau."""
     tau = 1.0
     sigma_xi = 0.20
     val = float(forward.A_function(
@@ -92,8 +92,8 @@ def test_A_function_pure_long_term_variance_grows_linearly() -> None:
 
 
 def test_A_function_pure_short_term_variance_saturates() -> None:
-    """σ_ξ = 0 and λ_χ = 0 reduce A(τ) to 0.5 (1-e^{-2κτ}) σ_χ²/(2κ),
-    which saturates at σ_χ²/(4κ) for large τ."""
+    """sigma_xi = 0 and lambda_chi = 0 reduce A(tau) to 0.5 (1-e^{-2kappatau}) sigma_chi²/(2kappa),
+    which saturates at sigma_chi²/(4kappa) for large tau."""
     sigma_chi = 0.40
     kappa = 1.0
     val_large = float(forward.A_function(
@@ -126,7 +126,7 @@ def test_A_function_vectorised_matches_scalar() -> None:
 
 
 def test_futures_log_price_at_zero_tau_is_spot_plus_seasonal() -> None:
-    """At τ = 0: ln F(t, t) = χ_t + ξ_t + s(month_of_t). A(0) = 0."""
+    """At tau = 0: ln F(t, t) = chi_t + xi_t + s(month_of_t). A(0) = 0."""
     seas = np.linspace(0.05, -0.05, 11)  # arbitrary monthly pattern Feb..Dec
     params = _trivial_params(seasonal_dummies=seas)
     # Test for each delivery month
@@ -149,8 +149,8 @@ def test_futures_log_price_yearly_uses_mean_seasonal() -> None:
 
 
 def test_futures_log_price_short_term_decays_exponentially() -> None:
-    """The χ contribution to log F decays as e^{-κτ} so the price for a
-    long-dated contract is dominated by ξ + A(τ)."""
+    """The chi contribution to log F decays as e^{-kappatau} so the price for a
+    long-dated contract is dominated by xi + A(tau)."""
     params = _trivial_params(
         kappa=2.0, sigma_chi=0.0, sigma_xi=0.0, rho=0.0,
         mu_xi_star=0.0, lambda_chi=0.0,
@@ -162,9 +162,9 @@ def test_futures_log_price_short_term_decays_exponentially() -> None:
     long_ = forward.futures_log_price(
         params, chi=chi, xi=xi, tau=10.0, delivery_month=1,
     )
-    # Short-dated contains ~0.5 · e^{-0.2} = 0.41 of χ; long-dated ~0
+    # Short-dated contains ~0.5 · e^{-0.2} = 0.41 of chi; long-dated ~0
     assert abs(short - (xi + chi * np.exp(-2.0 * 0.1))) < 1e-12
-    assert abs(long_ - xi) < 1e-5  # χ contribution effectively zero
+    assert abs(long_ - xi) < 1e-5  # chi contribution effectively zero
 
 
 def test_futures_log_price_requires_delivery_or_yearly() -> None:
@@ -232,7 +232,7 @@ def test_simulate_returns_tuple() -> None:
 
 
 def _make_omip_fixture() -> pd.DataFrame:
-    """Two trade dates × handful of contracts for prepare_observations tests."""
+    """Two trade dates x handful of contracts for prepare_observations tests."""
     rows = [
         # Trade date 2024-01-02: two M contracts + two YR contracts.
         ("2024-01-02", "M",  "FTB M Feb-24",  60.0),
@@ -447,8 +447,8 @@ def test_kalman_filter_better_params_yield_higher_likelihood() -> None:
 # NOTE: a synthetic end-to-end MLE recovery test would be the natural
 # place to assert that the optimiser converges interior with reasonable
 # parameter recovery. Empirically, 20-parameter L-BFGS-B on 50 synthetic
-# dates × 4 contracts does NOT converge within practical iteration caps
-# (the σ_ξ / ρ / risk-premium directions are weakly identified on short
+# dates x 4 contracts does NOT converge within practical iteration caps
+# (the sigma_xi / rho / risk-premium directions are weakly identified on short
 # series); even with a warm start within ±10 % of truth the optimiser
 # hits the iteration limit before satisfying the L-BFGS-B convergence
 # tolerance. The meaningful test for end-to-end correctness is on real
@@ -486,7 +486,7 @@ def test_mle_flags_bound_active_kappa(caplog) -> None:
     )
     with caplog.at_level(logging.WARNING, logger="mibel_derivatives.models.forward"):
         fit_res = forward._fit_from_obs(obs, initial_params=warm, max_iter=50)
-    # κ̂ lands at the lower bound within tolerance.
+    # kappâ lands at the lower bound within tolerance.
     assert abs(fit_res.params.kappa - forward.KAPPA_BOUNDS[0]) < 1e-3
     # And the warning recorded it.
     assert any("kappa" in rec.message and "bound" in rec.message for rec in caplog.records)

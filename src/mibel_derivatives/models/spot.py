@@ -3,59 +3,59 @@
 Specification (CONTEXT.md § Pieza 1, reespec 2026-05-24):
 
     Y_t = log(P_t + c)                                  c = 10 EUR/MWh
-    Y_t = θ_t + s(t) + Z_t
+    Y_t = theta_t + s(t) + Z_t
 
 where the three components are, from slowest to fastest:
 
-  • θ_t  — causal EMA of Y_t with ``span = EMA_SPAN`` hours. The default
-    ``EMA_SPAN = 24`` makes θ_t the daily-level component (the price
+  • theta_t  — causal EMA of Y_t with ``span = EMA_SPAN`` hours. The default
+    ``EMA_SPAN = 24`` makes theta_t the daily-level component (the price
     level for "today" driven by unit-commitment, ramp limits and the
     gas day) and the fast residual the intraday component. See the
     constant docstring below for why the original "~30 days" target
     didn't survive the bounded MLE on real OMIE data; the operational
     interpretation is cleaner anyway.
-  • s(t) — deterministic seasonality, fit by OLS on X_t := Y_t − θ_t:
-        s(t) = α + Σ_{k=1..K} (a_k cos + b_k sin)(2π k·doy/365.25)
-               + Σ_{d=1..6} γ_d 1{dow=d}
+  • s(t) — deterministic seasonality, fit by OLS on X_t := Y_t - theta_t:
+        s(t) = alpha + Σ_{k=1..K} (a_k cos + b_k sin)(2pi k·doy/365.25)
+               + Σ_{d=1..6} gamma_d 1{dow=d}
                + Σ_{h=1..23} δ_h 1{hod=h}.
   • Z_t — fast OU residual with hour-of-day heteroskedastic vol and Kou
     asymmetric double-exponential jumps:
-        dZ_t = -κ Z_t dt + σ_{h(t)} dW_t + J_t dN_t,
-        N_t ~ Poisson(λ),
-        J_t ~ AsymmetricDoubleExponential(p_up, η_up, η_down).
+        dZ_t = -kappa Z_t dt + sigma_{h(t)} dW_t + J_t dN_t,
+        N_t ~ Poisson(lambda),
+        J_t ~ AsymmetricDoubleExponential(p_up, eta_up, eta_down).
 
 Calibration pipeline (in :func:`fit`):
 
-    1.  θ̂_t = ``Y_t.ewm(span=EMA_SPAN, adjust=False).mean()`` (causal,
+    1.  thetâ_t = ``Y_t.ewm(span=EMA_SPAN, adjust=False).mean()`` (causal,
         backward-looking).
-    2.  X_t = Y_t − θ̂_t.
+    2.  X_t = Y_t - thetâ_t.
     3.  OLS of X_t on the seasonal design matrix → ŝ(t).
-    4.  Z_t = X_t − ŝ(t); ΔZ_t are the hourly returns of Z.
+    4.  Z_t = X_t - ŝ(t); DeltaZ_t are the hourly returns of Z.
     5.  Refined threshold jump detection: dynamic k by hour-of-day
         (``k_peak`` ≈ 6.0 in 18-22 UTC, ``k_base`` ≈ 4.5 elsewhere) with
-        an absolute amplitude floor |ΔZ| ≥ ``JUMP_AMPLITUDE_MIN`` = 0.30.
+        an absolute amplitude floor |DeltaZ| >= ``JUMP_AMPLITUDE_MIN`` = 0.30.
         Iterated until the flagged set stabilises.
-    6.  Bounded MLE on the OU (κ, σ_h) using
+    6.  Bounded MLE on the OU (kappa, sigma_h) using
         ``scipy.optimize.minimize(method='L-BFGS-B')`` with the bounds
         documented below; ``RuntimeError`` if a parameter touches a bound
         or the optimiser fails.
-    7.  Bounded MLE on the Kou jump distribution (λ, p_up, η_up, η_down).
-    8.  Slow-factor RW parameters drift μ̂, σ̂ from the increments
-        Δθ̂_t (used by :func:`simulate` to evolve θ_t forward).
+    7.  Bounded MLE on the Kou jump distribution (lambda, p_up, eta_up, eta_down).
+    8.  Slow-factor RW parameters drift mû, sigmâ from the increments
+        Deltathetâ_t (used by :func:`simulate` to evolve theta_t forward).
 
 Simulation (in :func:`simulate`) is the inverse composition: a slow RW
-for θ_t plus the deterministic ŝ plus the OU+Kou for Z_t, then
-``P_t = exp(θ_t + s(t) + Z_t) − c``.
+for theta_t plus the deterministic ŝ plus the OU+Kou for Z_t, then
+``P_t = exp(theta_t + s(t) + Z_t) - c``.
 
 Bounds enforced by the calibration:
 
-  • κ        ∈ [KAPPA_BOUNDS_LO, KAPPA_BOUNDS_HI] = [0.05, 0.20] /h
+  • kappa        ∈ [KAPPA_BOUNDS_LO, KAPPA_BOUNDS_HI] = [0.05, 0.20] /h
     (half-life 3.5 h - 14 h), the plausible electricity short-term
     range once the slow factor has been removed.
-  • λ        ∈ [LAMBDA_BOUNDS_LO, LAMBDA_BOUNDS_HI] = [0.008, 0.025] /h
+  • lambda        ∈ [LAMBDA_BOUNDS_LO, LAMBDA_BOUNDS_HI] = [0.008, 0.025] /h
     (≈ 70 - 220 jumps / year), the European-power MRJD literature
     range.
-  • η_up, η_down ∈ [ETA_BOUNDS_LO, ETA_BOUNDS_HI] = [0.8, 4.0]; the
+  • eta_up, eta_down ∈ [ETA_BOUNDS_LO, ETA_BOUNDS_HI] = [0.8, 4.0]; the
     upper bound bounds the upward MGF, the lower bound preserves heavy
     tails when the data demands them.
 
@@ -63,11 +63,11 @@ References: Lucia & Schwartz (2002) for the deterministic-seasonal +
 OU baseline, Cartea & Figueroa (2005) for the jump-diffusion extension,
 Kou (2002) for the asymmetric double-exponential jump distribution.
 
-Overlap with Pieza 2 (Schwartz-Smith): the slow factor θ_t here is a
+Overlap with Pieza 2 (Schwartz-Smith): the slow factor theta_t here is a
 **purely backward-looking statistic** of the spot series, with no
 anchoring to the OMIP forward curve. It is the standalone replacement
 for the Schwartz-Smith long-term factor L_t when a forward-curve fit
-is not available; once Pieza 2 lands, L_t replaces θ_t for any
+is not available; once Pieza 2 lands, L_t replaces theta_t for any
 valuation that needs to reproduce the live OMIP curve.
 """
 
@@ -87,14 +87,14 @@ FOURIER_HARMONICS: int = 4
 
 # EMA_SPAN was originally specified at 720 h (~30 days) to absorb the
 # 2022 gas-crisis regime shift. Empirically the bounded MLE on real
-# OMIE 2019-2024 hits the κ lower bound at every span ≥ 48 h: the
+# OMIE 2019-2024 hits the kappa lower bound at every span >= 48 h: the
 # residual carries strong 24-hour and 168-hour autocorrelations
 # (≈ 0.50 and ≈ 0.30 respectively) that the additive Fourier + DoW + HoD
-# seasonality cannot fully resolve (no DoW × HoD interaction), and the
+# seasonality cannot fully resolve (no DoW x HoD interaction), and the
 # OU absorbs them as a slow mean-reversion. With EMA_SPAN = 24 the slow
 # factor tracks the daily level — driven by operational constraints
 # (unit commitment, ramp limits, gas day) — and the fast residual
-# carries only intraday dynamics. κ̂ and λ̂ then land inside the
+# carries only intraday dynamics. kappâ and lambdâ then land inside the
 # bounded ranges. The 2022 regime shift is still absorbed by the slow
 # factor; it is just absorbed at a daily resolution rather than at a
 # monthly resolution. See reports/diagnostics/spot_model_calibration.md
@@ -139,32 +139,32 @@ class Seasonality:
 
 @dataclass(frozen=True)
 class SlowFactorParams:
-    """Slow-OU parameters for the slow factor θ_t.
+    """Slow-OU parameters for the slow factor theta_t.
 
     The arithmetic-RW formulation in the original reespec proved
     unstable when exponentiated over a 1-year horizon: cumulative
-    σ_θ · √T explodes E[P_t] through Jensen even for "small per-hour
+    sigma_theta · √T explodes E[P_t] through Jensen even for "small per-hour
     noise". The fit therefore calibrates a slow Ornstein-Uhlenbeck
     instead, which has a finite stationary distribution by
     construction:
 
-        θ_{t+1} = μ_θ + exp(-κ_θ Δt) · (θ_t − μ_θ) + σ_θ ε_t,
-        ε_t ~ N(0, 1).
+        theta_{t+1} = mu_theta + exp(-kappa_theta Deltat) · (theta_t - mu_theta) + sigma_theta epsilon_t,
+        epsilon_t ~ N(0, 1).
 
-    With κ_θ → 0 the slow factor degenerates to a random walk; with
-    κ_θ ≫ 0 it collapses to a flat μ_θ. Calibration uses an AR(1)
-    regression on the historical θ̂_t series centred at its sample
+    With kappa_theta → 0 the slow factor degenerates to a random walk; with
+    kappa_theta ≫ 0 it collapses to a flat mu_theta. Calibration uses an AR(1)
+    regression on the historical thetâ_t series centred at its sample
     mean:
 
-        μ̂_θ      = mean(θ̂_t)
-        φ̂_θ      = Σ (θ̂_t − μ̂_θ)(θ̂_{t+1} − μ̂_θ) / Σ (θ̂_t − μ̂_θ)²
-        κ̂_θ      = -log(φ̂_θ)
-        σ̂_θ²     = sample variance of innovations.
+        mû_theta      = mean(thetâ_t)
+        phî_theta      = Σ (thetâ_t - mû_theta)(thetâ_{t+1} - mû_theta) / Σ (thetâ_t - mû_theta)²
+        kappâ_theta      = -log(phî_theta)
+        sigmâ_theta²     = sample variance of innovations.
 
     For OMIE 2019-2024 (EMA_SPAN = 24) this gives
-    κ̂_θ ≈ 8 × 10⁻⁴ (half-life ≈ 37 days) and σ̂_θ ≈ 0.027, with
-    stationary std σ̂_θ / √(2 κ̂_θ) ≈ 0.68 matching the empirical
-    spread of θ̂_t over the period.
+    kappâ_theta ≈ 8 x 10⁻⁴ (half-life ≈ 37 days) and sigmâ_theta ≈ 0.027, with
+    stationary std sigmâ_theta / √(2 kappâ_theta) ≈ 0.68 matching the empirical
+    spread of thetâ_t over the period.
     """
 
     kappa: float
@@ -193,13 +193,13 @@ class SpotModelFit:
     """Calibration result: params plus per-observation diagnostics.
 
     Series fields:
-        theta_series       — causal EMA of log(P+c), the slow factor θ̂_t.
-        x_series           — log(P+c) − θ̂_t, the post-slow residual X_t.
+        theta_series       — causal EMA of log(P+c), the slow factor thetâ_t.
+        x_series           — log(P+c) - thetâ_t, the post-slow residual X_t.
         seasonal_fitted    — ŝ(t) fit on X_t.
-        residuals          — Z_t = X_t − ŝ(t), the fast OU+jumps residual.
-        residual_returns   — ΔZ_t, the one-hour innovations of Z_t.
+        residuals          — Z_t = X_t - ŝ(t), the fast OU+jumps residual.
+        residual_returns   — DeltaZ_t, the one-hour innovations of Z_t.
         jumps_mask         — bool on residual_returns.index.
-        jump_sizes         — the values of ΔZ_t at flagged jump points.
+        jump_sizes         — the values of DeltaZ_t at flagged jump points.
     """
 
     params: SpotModelParams
@@ -245,13 +245,13 @@ def fit(
         Number of annual Fourier harmonics in the deterministic
         component.
     ema_span
-        Span (in hours) of the causal EMA used for the slow factor θ_t.
+        Span (in hours) of the causal EMA used for the slow factor theta_t.
     jump_k_base, jump_k_peak, jump_peak_hours, jump_amplitude_min
         Refined-detection knobs forwarded to :func:`_detect_jumps`. The
         peak-hour threshold ``jump_k_peak`` applies to the UTC hours in
         ``jump_peak_hours`` (default 18-22), ``jump_k_base`` everywhere
         else; ``jump_amplitude_min`` is the absolute-log-return floor
-        below which σ-threshold breaches are ignored.
+        below which sigma-threshold breaches are ignored.
     jump_max_iter
         Maximum iterations of the jump detector.
 
@@ -307,7 +307,7 @@ def fit(
     y_theta = theta_pw_arr - mu_theta
     denom_theta = float((y_theta[:-1] ** 2).sum())
     if denom_theta <= 0:
-        # Degenerate (e.g., constant θ) — set zero-noise OU at the mean.
+        # Degenerate (e.g., constant theta) — set zero-noise OU at the mean.
         kappa_theta = 0.0
         sigma_theta = 0.0
     else:
@@ -499,13 +499,13 @@ def simulate(
 
     The structural composition is the inverse of :func:`fit`:
 
-        θ_{t+1} = θ_t + μ_θ + σ_θ · ξ_t,             ξ_t ~ N(0, 1)
-        Z_{t+1} = φ Z_t + σ_{h(t+1)} √((1−φ²)/(2κ)) ε_t + J_t B_t
-        log(P_t + c) = θ_t + s(t) + Z_t
-        P_t = exp(log(P_t + c)) − c
+        theta_{t+1} = theta_t + mu_theta + sigma_theta · xi_t,             xi_t ~ N(0, 1)
+        Z_{t+1} = phi Z_t + sigma_{h(t+1)} √((1-phi²)/(2kappa)) epsilon_t + J_t B_t
+        log(P_t + c) = theta_t + s(t) + Z_t
+        P_t = exp(log(P_t + c)) - c
 
-    where (μ_θ, σ_θ) come from ``params.slow_factor``, ε_t ~ N(0, 1),
-    B_t ~ Bernoulli(λ) and J_t is drawn from the Kou asymmetric
+    where (mu_theta, sigma_theta) come from ``params.slow_factor``, epsilon_t ~ N(0, 1),
+    B_t ~ Bernoulli(lambda) and J_t is drawn from the Kou asymmetric
     double-exponential.
 
     Inputs
@@ -523,11 +523,11 @@ def simulate(
         Reproducibility.
 
     The returned array has shape ``(n_paths, n_hours)`` in EUR/MWh.
-    Negative samples are possible when ``θ_t + s(t) + Z_t`` falls
+    Negative samples are possible when ``theta_t + s(t) + Z_t`` falls
     below ``log(c)``.
 
-    Bernoulli(λ) is an exact substitute for Poisson(λ Δt) under
-    ``λ Δt ≪ 1`` (electricity hourly intensities are ~10⁻²).
+    Bernoulli(lambda) is an exact substitute for Poisson(lambda Deltat) under
+    ``lambda Deltat ≪ 1`` (electricity hourly intensities are ~10⁻²).
     """
     if start.tz is None:
         raise ValueError("start must be a UTC-tz-aware Timestamp")
@@ -541,7 +541,7 @@ def simulate(
 
     seasonal_t = _seasonal_predict(params.seasonality, idx).to_numpy()
 
-    # --- Slow factor θ_t: slow OU around μ_θ. -----------------------------
+    # --- Slow factor theta_t: slow OU around mu_theta. -----------------------------
     kappa_theta = params.slow_factor.kappa
     mu_theta = params.slow_factor.mean
     sigma_theta = params.slow_factor.sigma
@@ -601,7 +601,7 @@ def _seasonal_design_matrix(
 
     1. ``intercept`` (constant 1).
     2. ``2 * harmonics`` Fourier columns ``cos_k`` / ``sin_k`` for
-       ``k = 1..harmonics`` using ``angle = 2π · day_of_year / 365.25``.
+       ``k = 1..harmonics`` using ``angle = 2pi · day_of_year / 365.25``.
     3. Six day-of-week dummies ``dow_1..dow_6`` (Monday = 0 is the
        omitted reference).
     4. Twenty-three hour-of-day dummies ``hod_1..hod_23`` (hour 0 UTC
@@ -694,15 +694,15 @@ def _detect_jumps(
     amplitude_min: float = JUMP_AMPLITUDE_MIN,
     max_iter: int = JUMP_MAX_ITER,
 ) -> pd.Series:
-    """Iterative threshold jump detector with σ updated by hour-of-day,
+    """Iterative threshold jump detector with sigma updated by hour-of-day,
     a peak-hour-specific threshold and an absolute amplitude floor.
 
-    At each iteration the per-hour mean μ_h and standard deviation σ_h
+    At each iteration the per-hour mean mu_h and standard deviation sigma_h
     are computed from the currently un-flagged returns. A return at
     hour ``h(t)`` is flagged a jump when BOTH:
 
-        |ΔZ_t − μ_{h(t)}| > k_h · σ_{h(t)}    (dynamic σ-threshold)
-        |ΔZ_t|             > amplitude_min     (absolute floor in log)
+        |DeltaZ_t - mu_{h(t)}| > k_h · sigma_{h(t)}    (dynamic sigma-threshold)
+        |DeltaZ_t|             > amplitude_min     (absolute floor in log)
 
     where ``k_h = k_peak`` if ``h ∈ peak_hours`` else ``k_base``. The
     peak-hour threshold targets the evening price band (default
@@ -757,18 +757,18 @@ def _mle_ou(
     """Bounded MLE for the OU process on non-jump observations.
 
     Optimises the discrete AR(1) Gaussian log-likelihood over
-    ``(κ, σ_0, σ_1, …, σ_23)`` with ``scipy.optimize.minimize(method=
-    'L-BFGS-B')`` and the project bounds (``KAPPA_BOUNDS`` on κ,
-    ``[sigma_lower, +∞)`` on each σ_h).
+    ``(kappa, sigma_0, sigma_1, …, sigma_23)`` with ``scipy.optimize.minimize(method=
+    'L-BFGS-B')`` and the project bounds (``KAPPA_BOUNDS`` on kappa,
+    ``[sigma_lower, +∞)`` on each sigma_h).
 
     Per-observation density:
 
-        Z_{t+1} | Z_t  ~  N(φ Z_t, σ_{h(t+1)}^2 · (1 − φ^2) / (2 κ)),
-        φ = exp(-κ · dt_hours).
+        Z_{t+1} | Z_t  ~  N(phi Z_t, sigma_{h(t+1)}^2 · (1 - phi^2) / (2 kappa)),
+        phi = exp(-kappa · dt_hours).
 
-    A closed-form AR(1) estimate of (κ, σ_h) is used as the warm start
+    A closed-form AR(1) estimate of (kappa, sigma_h) is used as the warm start
     (clipped into the bounds). The function raises ``RuntimeError`` if
-    the optimiser does not converge OR if κ̂ touches either of its
+    the optimiser does not converge OR if kappâ touches either of its
     bounds within tolerance 1e-3, with the bound-active path naming
     which side was hit so the caller can decide whether to widen the
     bound or re-examine the slow-factor extraction.
@@ -859,22 +859,22 @@ def _mle_jumps(
 ) -> tuple[float, float, float, float]:
     """Bounded MLE for the Poisson rate + Kou asymmetric double-exponential.
 
-    Joint optimisation over ``(λ, p_up, η_up, η_down)`` of the
+    Joint optimisation over ``(lambda, p_up, eta_up, eta_down)`` of the
     Poisson-times-Kou log-likelihood
 
-        log L = n_jumps · log λ − λ · n_total_hours
-              + n_up   · log(p_up · η_up)     − η_up   · Σ J_up
-              + n_down · log((1−p_up)·η_down) − η_down · Σ |J_down|
+        log L = n_jumps · log lambda - lambda · n_total_hours
+              + n_up   · log(p_up · eta_up)     - eta_up   · Σ J_up
+              + n_down · log((1-p_up)·eta_down) - eta_down · Σ |J_down|
 
     via ``scipy.optimize.minimize(method='L-BFGS-B')`` with the project
-    bounds (LAMBDA_BOUNDS on λ, ETA_BOUNDS on both η, P_UP_BOUNDS on
+    bounds (LAMBDA_BOUNDS on lambda, ETA_BOUNDS on both eta, P_UP_BOUNDS on
     p_up). Raises ``RuntimeError`` on non-convergence OR if any of
-    λ, η_up, η_down touches a bound within tolerance 1e-3 (p_up is
+    lambda, eta_up, eta_down touches a bound within tolerance 1e-3 (p_up is
     informational only — hitting its bounds means a one-sided sample,
     which is realistic).
 
-    When no jumps were detected, returns the lower bound for λ and
-    neutral defaults for the Kou parameters (η = 1.0, p_up = 0.5);
+    When no jumps were detected, returns the lower bound for lambda and
+    neutral defaults for the Kou parameters (eta = 1.0, p_up = 0.5);
     the caller may want to treat this as a degenerate calibration.
     """
     if n_total_hours <= 0:

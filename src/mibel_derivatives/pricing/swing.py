@@ -1,9 +1,9 @@
-"""Swing option pricer (Longstaff–Schwartz Monte Carlo).
+"""Swing option pricer (Longstaff-Schwartz Monte Carlo).
 
 Specification (CONTEXT.md § Swing option):
 
 Annual MIBEL electricity contract with a fixed strike, a daily exercise
-cap, and an annual maximum volume. Pricing via Longstaff–Schwartz with
+cap, and an annual maximum volume. Pricing via Longstaff-Schwartz with
 basis functions of (S_t, remaining_volume, time_to_maturity).
 
 Open spec items at scaffolding time (deferred to design phase):

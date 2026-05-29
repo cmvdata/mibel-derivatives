@@ -2,7 +2,7 @@
 
 Marked both ``slow`` and ``monte_carlo`` so they can be excluded from
 the fast CI path. The per-test wall is dominated by the bounded MLE on
-the full OMIP series (~1 600 trade dates × ~15 contracts each); a
+the full OMIP series (~1 600 trade dates x ~15 contracts each); a
 single fit takes several minutes on a modern laptop.
 
 The tests skip themselves cleanly if the curated OMIP and OMIE
@@ -115,7 +115,7 @@ def test_forward_curve_fit_quality(omip_fit: forward.SSFit) -> None:
     S-S leaves residuals around 0.15-0.20 on the M bucket (monthly
     contracts carry a richer seasonal cycle than 11 dummies fully
     resolve). YR bucket fits much tighter (0.01-0.03) because it
-    averages out the intra-year structure. Pieza 2 + DoW × HoD
+    averages out the intra-year structure. Pieza 2 + DoW x HoD
     interaction in s(T) would close most of this gap; pending."""
     assert 0 < omip_fit.rmse_log_m < 0.25, f"rmse_log_m={omip_fit.rmse_log_m:.4f}"
     assert 0 < omip_fit.rmse_log_yr < 0.10, f"rmse_log_yr={omip_fit.rmse_log_yr:.4f}"
@@ -130,7 +130,7 @@ def test_model_spot_reproduces_omie_daily_mean(
     """V3: model F(t, T=0) ≈ daily-mean OMIE on the trade dates.
 
     Computed across the whole window: the MAE between model-implied
-    log spot and historical log daily-mean spot must be ≤ 0.10 (≈ 10%
+    log spot and historical log daily-mean spot must be <= 0.10 (≈ 10%
     multiplicative).
     """
     _, omie_daily = omip_and_omie

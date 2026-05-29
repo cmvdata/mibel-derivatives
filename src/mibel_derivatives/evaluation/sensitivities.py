@@ -5,8 +5,8 @@ shocks to the relevant model input:
 
 - delta / gamma: shock the spot (or, for forward-settled exposures,
   the relevant forward maturity bucket).
-- vega: shock the diffusion volatility σ of the spot model; for the
-  Schwartz–Smith forward model, separate vegas for the short- and
+- vega: shock the diffusion volatility sigma of the spot model; for the
+  Schwartz-Smith forward model, separate vegas for the short- and
   long-factor diffusion volatilities.
 - theta: re-price advancing the valuation date by one calendar day
   while holding the rest of the state fixed.

@@ -6,7 +6,7 @@ Endpoint discovered 2026-05-22:
 
 One workbook per calendar year. Sheets of interest:
 
-- "Trading Data PVB" — one row per (trading day × product) for the
+- "Trading Data PVB" — one row per (trading day x product) for the
   Punto Virtual de Balance hub. Products include GDAES_D+1 (day-ahead),
   GMAES (month), GQES_Q+i (quarter), GYES_Y+i (year), GWDES (weekend),
   GW_BoMES (balance of month). Columns: trading day, product, place

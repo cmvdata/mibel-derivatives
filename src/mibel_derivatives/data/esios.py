@@ -313,5 +313,5 @@ def build_curated_panel(
     if write:
         out = _paths.curated_path("esios_panel.parquet")
         panel.reset_index().to_parquet(out, index=False)
-        logger.info("Wrote %s (%d rows × %d indicators)", out, len(panel), panel.shape[1])
+        logger.info("Wrote %s (%d rows x %d indicators)", out, len(panel), panel.shape[1])
     return panel

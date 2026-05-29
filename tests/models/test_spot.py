@@ -158,7 +158,7 @@ def test_seasonal_design_matrix_requires_tz() -> None:
 
 
 def test_fit_seasonality_recovers_known_coefficients() -> None:
-    """Synthetic series y = X β + ε with known β; OLS must recover β."""
+    """Synthetic series y = X beta + epsilon with known beta; OLS must recover beta."""
     rng = np.random.default_rng(seed=42)
     n_hours = 24 * 365 * 2  # 2 years hourly
     idx = _hourly_utc("2020-01-01", n_hours)
@@ -210,9 +210,9 @@ def test_design_matrix_buckets_correctly() -> None:
 
 
 def test_ema_is_causal_no_future_leakage() -> None:
-    """θ̂_t = ewm(span=720, adjust=False).mean() must not depend on any
+    """thetâ_t = ewm(span=720, adjust=False).mean() must not depend on any
     values past t. Truncating the future and re-evaluating up to t must
-    yield the same θ̂_t."""
+    yield the same thetâ_t."""
     rng = np.random.default_rng(seed=3)
     n = 24 * 365
     idx = _hourly_utc("2021-01-01", n)
@@ -226,16 +226,16 @@ def test_ema_is_causal_no_future_leakage() -> None:
 
 
 def test_fit_slow_factor_absorbs_planted_trend() -> None:
-    """A linear trend in log-price must be picked up by θ̂_t with a
+    """A linear trend in log-price must be picked up by thetâ_t with a
     positive drift in SlowFactorParams; the seasonal intercept stays
-    around zero. The fast residual is a small OU layer with κ inside
-    bounds so the (bounded) MLE doesn't trip its κ upper bound."""
+    around zero. The fast residual is a small OU layer with kappa inside
+    bounds so the (bounded) MLE doesn't trip its kappa upper bound."""
     rng = np.random.default_rng(seed=5)
     n_hours = 24 * 365 * 3
     idx = _hourly_utc("2020-01-01", n_hours)
     # Slow trend.
     trend = 3.5 + 0.0002 * np.arange(n_hours)
-    # Fast OU layer with κ=0.10 (inside [0.05, 0.20]) so the bounded
+    # Fast OU layer with kappa=0.10 (inside [0.05, 0.20]) so the bounded
     # MLE has a real signal to recover.
     kappa = 0.10
     sigma = 0.05
@@ -250,12 +250,12 @@ def test_fit_slow_factor_absorbs_planted_trend() -> None:
     theta_pw = result.theta_series.iloc[result.params.ema_span:]
     n_pw = len(theta_pw)
     assert theta_pw.iloc[-n_pw // 4:].mean() > theta_pw.iloc[: n_pw // 4].mean() + 0.5
-    # Slow OU collapses to phi_θ near 1 on a trended series (no
-    # mean-reversion within the window); sigma_θ stays finite.
+    # Slow OU collapses to phi_theta near 1 on a trended series (no
+    # mean-reversion within the window); sigma_theta stays finite.
     assert np.exp(-result.params.slow_factor.kappa) > 0.99
     assert result.params.slow_factor.sigma > 0.0
     assert abs(result.params.seasonality.intercept) < 0.10
-    # κ̂ inside bounds (would have raised otherwise).
+    # kappâ inside bounds (would have raised otherwise).
     assert spot.KAPPA_BOUNDS[0] <= result.params.kappa <= spot.KAPPA_BOUNDS[1]
 
 
@@ -293,7 +293,7 @@ def _synthetic_returns_with_jumps(
     sigma_base: float = 0.10,
     sigma_slope: float = 0.005,
 ) -> pd.Series:
-    """Build hourly residual returns ~ N(0, σ_h) with planted jumps."""
+    """Build hourly residual returns ~ N(0, sigma_h) with planted jumps."""
     rng = np.random.default_rng(seed=seed)
     idx = _hourly_utc("2022-01-01", n_hours)
     hours = np.asarray(idx.hour)
@@ -341,8 +341,8 @@ def test_detect_jumps_recovers_planted_jumps_with_high_precision_and_recall() ->
 
 def test_detect_jumps_low_false_positive_on_pure_gaussian() -> None:
     """No jumps planted; at k_base=4 the false-positive rate from the
-    σ-threshold step alone is ~0.5%. With the amplitude floor at 0.30
-    on σ ≈ 0.10 returns, FP collapses to essentially zero."""
+    sigma-threshold step alone is ~0.5%. With the amplitude floor at 0.30
+    on sigma ≈ 0.10 returns, FP collapses to essentially zero."""
     n_hours = 24 * 365
     rng = np.random.default_rng(seed=99)
     idx = _hourly_utc("2023-01-01", n_hours)
@@ -372,12 +372,12 @@ def test_detect_jumps_converges_within_max_iter() -> None:
 
 
 def test_detect_jumps_amplitude_floor_drops_small_breaches() -> None:
-    """A planted jump of size 0.20 (above k·σ but below amplitude floor)
+    """A planted jump of size 0.20 (above k·sigma but below amplitude floor)
     must NOT be flagged."""
     n_hours = 24 * 200
     rng = np.random.default_rng(seed=42)
     idx = _hourly_utc("2022-01-01", n_hours)
-    # Pure low-σ noise plus a small spike of 0.20 (above 4·σ=0.04 but
+    # Pure low-sigma noise plus a small spike of 0.20 (above 4·sigma=0.04 but
     # below amplitude_min=0.30).
     rr = pd.Series(rng.standard_normal(n_hours) * 0.01, index=idx)
     small_jump_loc = n_hours // 2
@@ -394,14 +394,14 @@ def test_detect_jumps_amplitude_floor_drops_small_breaches() -> None:
 
 
 def test_detect_jumps_peak_hour_threshold_lets_through_evening_spikes() -> None:
-    """A jump of size 0.50 at hour 20 (peak) should pass k_base=4.5·σ
-    BUT fail k_peak=6.0·σ when σ ~ 0.10. Conversely at hour 04 (off-peak)
+    """A jump of size 0.50 at hour 20 (peak) should pass k_base=4.5·sigma
+    BUT fail k_peak=6.0·sigma when sigma ~ 0.10. Conversely at hour 04 (off-peak)
     the SAME jump passes the relaxed k_base threshold but no peak rule
     applies. The peak-hour bump is doing real work."""
     n_hours = 24 * 200
     rng = np.random.default_rng(seed=7)
     idx = _hourly_utc("2022-01-01", n_hours)
-    # σ ≈ 0.10; 4.5·σ ≈ 0.45; 6.0·σ ≈ 0.60.
+    # sigma ≈ 0.10; 4.5·sigma ≈ 0.45; 6.0·sigma ≈ 0.60.
     rr = pd.Series(rng.standard_normal(n_hours) * 0.10, index=idx)
 
     # Inject a 0.50 jump at one peak hour (h20) and one off-peak (h04).
@@ -423,9 +423,9 @@ def test_detect_jumps_peak_hour_threshold_lets_through_evening_spikes() -> None:
         peak_hours=(18, 19, 20, 21, 22),
         amplitude_min=0.30,
     )
-    # Off-peak jump: 0.50 > 4.5·σ AND > 0.30 floor → flagged.
+    # Off-peak jump: 0.50 > 4.5·sigma AND > 0.30 floor → flagged.
     assert bool(flagged.iloc[off_loc])
-    # Peak jump: 0.50 < 6.0·σ ≈ 0.60 → NOT flagged despite passing floor.
+    # Peak jump: 0.50 < 6.0·sigma ≈ 0.60 → NOT flagged despite passing floor.
     assert not bool(flagged.iloc[peak_loc])
 
 
@@ -440,7 +440,7 @@ def _simulate_ou_path(
     seed: int,
     start: str = "2020-01-01",
 ) -> pd.Series:
-    """Generate a discrete OU path Z_t with hour-of-day σ heteroskedasticity."""
+    """Generate a discrete OU path Z_t with hour-of-day sigma heteroskedasticity."""
     rng = np.random.default_rng(seed=seed)
     idx = _hourly_utc(start, n_hours)
     hours = np.asarray(idx.hour)
@@ -463,7 +463,7 @@ def test_mle_ou_recovers_kappa_and_sigma_no_jumps() -> None:
     kappa_hat, sigma_h_hat = spot._mle_ou(z, jump_mask)
 
     rel_err_k = abs(kappa_hat - true_kappa) / true_kappa
-    assert rel_err_k < 0.10, f"κ true={true_kappa:.4f} hat={kappa_hat:.4f}"
+    assert rel_err_k < 0.10, f"kappa true={true_kappa:.4f} hat={kappa_hat:.4f}"
     np.testing.assert_allclose(sigma_h_hat, true_sigma_h, rtol=0.10, atol=0.01)
 
 
@@ -498,7 +498,7 @@ def _simulate_jump_diffusion_path(
 
 def test_mle_ou_robust_to_planted_jumps_when_masked() -> None:
     """When the jump mask correctly identifies planted jumps, the OU
-    estimator still recovers κ and σ_h within tolerance."""
+    estimator still recovers kappa and sigma_h within tolerance."""
     rng = np.random.default_rng(seed=7)
     n_hours = 24 * 365 * 3
     true_kappa = 0.08
@@ -520,7 +520,7 @@ def test_mle_ou_robust_to_planted_jumps_when_masked() -> None:
 
     kappa_hat, sigma_h_hat = spot._mle_ou(z_series, jump_mask)
     assert abs(kappa_hat - true_kappa) / true_kappa < 0.15, (
-        f"κ true={true_kappa:.4f} hat={kappa_hat:.4f}"
+        f"kappa true={true_kappa:.4f} hat={kappa_hat:.4f}"
     )
     np.testing.assert_allclose(sigma_h_hat, true_sigma_h, rtol=0.15, atol=0.02)
 
@@ -529,7 +529,7 @@ def test_mle_jumps_recovers_kou_params() -> None:
     """Recovery with all true parameters STRICTLY inside the bounds."""
     rng = np.random.default_rng(seed=123)
     n_total = 24 * 365 * 5  # 5 years hourly
-    n_jumps = 500           # λ_true = 500 / 43800 ≈ 0.0114 (inside [0.008, 0.025])
+    n_jumps = 500           # lambda_true = 500 / 43800 ≈ 0.0114 (inside [0.008, 0.025])
     true_lambda = n_jumps / n_total
     true_p_up = 0.70
     true_eta_up = 2.0       # inside [0.8, 4.0]
@@ -551,7 +551,7 @@ def test_mle_jumps_recovers_kou_params() -> None:
 
 
 def test_mle_jumps_handles_empty_input() -> None:
-    """With no detected jumps, λ̂ defaults to the lower bound and Kou
+    """With no detected jumps, lambdâ defaults to the lower bound and Kou
     params to neutral; the bound-active check is bypassed in this path."""
     intensity, p_up, eta_up, eta_down = spot._mle_jumps(
         pd.Series(dtype=float), n_total_hours=24 * 30,
@@ -574,10 +574,10 @@ def test_mle_jumps_raises_on_lambda_below_bound() -> None:
 
 
 def test_mle_jumps_raises_on_eta_above_bound() -> None:
-    """A sample of tiny jumps (mean 0.1, η_true=10) hits eta upper bound."""
+    """A sample of tiny jumps (mean 0.1, eta_true=10) hits eta upper bound."""
     rng = np.random.default_rng(seed=11)
     n_total = 24 * 365 * 5
-    # 500 jumps with very small sizes — true η ~ 10 (way above ETA_BOUNDS[1]=4)
+    # 500 jumps with very small sizes — true eta ~ 10 (way above ETA_BOUNDS[1]=4)
     n_jumps = 500
     is_up = rng.random(n_jumps) < 0.5
     sizes_up = rng.exponential(0.1, n_jumps)
@@ -589,7 +589,7 @@ def test_mle_jumps_raises_on_eta_above_bound() -> None:
 
 
 def test_mle_ou_raises_when_kappa_outside_bounds() -> None:
-    """A series with κ_true=0.005 (below KAPPA_BOUNDS[0]=0.05) must hit
+    """A series with kappa_true=0.005 (below KAPPA_BOUNDS[0]=0.05) must hit
     the lower bound and raise RuntimeError."""
     rng = np.random.default_rng(seed=22)
     n_hours = 24 * 200
@@ -609,11 +609,11 @@ def test_mle_ou_raises_when_kappa_outside_bounds() -> None:
 def test_fit_end_to_end_recovers_seasonal_and_ou_under_slow_fast() -> None:
     """Synthetic OMIE-like series with known seasonality + OU + Kou jumps,
     NO trend in the slow factor. After the EMA decomposition:
-      • θ̂_t should be flat at ≈ true_intercept + Fourier_annual_mean ≈ true_intercept
+      • thetâ_t should be flat at ≈ true_intercept + Fourier_annual_mean ≈ true_intercept
         (Fourier sin/cos integrate to 0 over the year).
       • The post-EMA seasonal fit intercept should be small (the slow factor
         absorbed the level), DoW and HoD coefs should still be recovered.
-      • κ̂ and σ̂_h should be close to truth on the deseasonalised X_t."""
+      • kappâ and sigmâ_h should be close to truth on the deseasonalised X_t."""
     rng = np.random.default_rng(seed=2026)
     n_hours = 24 * 365 * 4  # 4 years hourly
 
@@ -633,9 +633,9 @@ def test_fit_end_to_end_recovers_seasonal_and_ou_under_slow_fast() -> None:
     )
     # Plant enough jumps so that, after the k=4.5 / amplitude=0.30 floor
     # culls the small-magnitude tail, the surviving rate sits inside
-    # LAMBDA_BOUNDS = [0.008, 0.025]. With η_up=2, η_down=3 detection
+    # LAMBDA_BOUNDS = [0.008, 0.025]. With eta_up=2, eta_down=3 detection
     # keeps ~34% of planted (38% off-peak + 22% peak); 1500 planted →
-    # ~510 detected → λ̂ ≈ 0.0145 inside the lambda bounds.
+    # ~510 detected → lambdâ ≈ 0.0145 inside the lambda bounds.
     n_jumps_planted = 1500
     jump_times = rng.choice(np.arange(1, n_hours), size=n_jumps_planted, replace=False)
     is_up = rng.random(n_jumps_planted) < 0.70
@@ -659,11 +659,11 @@ def test_fit_end_to_end_recovers_seasonal_and_ou_under_slow_fast() -> None:
     result = spot.fit(prices, ema_span=720)
     p = result.params
 
-    # θ̂_t absorbs the level PLUS the non-zero means of the dummy blocks
+    # thetâ_t absorbs the level PLUS the non-zero means of the dummy blocks
     # (Mon and h0 are the omitted references, so DoW/HoD coefs do not sum
     # to zero across categories) PLUS the stationary mean of the jump
     # component (asymmetric Kou with E[J] ≠ 0):
-    #   E[θ̂] ≈ intercept + Σ dow/7 + Σ hod/24 + λ_planted · E[J] / κ
+    #   E[thetâ] ≈ intercept + Σ dow/7 + Σ hod/24 + lambda_planted · E[J] / kappa
     true_E_J = 0.70 / true_eta_up - 0.30 / true_eta_down  # ≈ 0.25
     lambda_planted = n_jumps_planted / n_hours
     expected_z_mean = lambda_planted * true_E_J / true_kappa
@@ -673,11 +673,11 @@ def test_fit_end_to_end_recovers_seasonal_and_ou_under_slow_fast() -> None:
     )
     theta_pw = result.theta_series.iloc[p.ema_span:]
     assert abs(theta_pw.mean() - expected_theta_mean) < 0.05, (
-        f"θ̂ mean={theta_pw.mean():.4f} expected={expected_theta_mean:.4f}"
+        f"thetâ mean={theta_pw.mean():.4f} expected={expected_theta_mean:.4f}"
     )
     # After slow-factor removal, the seasonal regression intercept is the
     # negative of the dummy-block means (so that adding intercept + dummy
-    # contributions back to θ̂ reconstructs the original level on average).
+    # contributions back to thetâ reconstructs the original level on average).
     expected_intercept = (
         -true_dow.sum() / 7.0 - true_hod.sum() / 24.0
     )
@@ -688,20 +688,20 @@ def test_fit_end_to_end_recovers_seasonal_and_ou_under_slow_fast() -> None:
     # OU recovery still works (closed-form MLE in G1; bounded MLE in G3).
     assert abs(p.kappa - true_kappa) / true_kappa < 0.25
     np.testing.assert_allclose(p.sigma_by_hour, true_sigma_h, rtol=0.30, atol=0.02)
-    # Large jumps recovered (small ones below the k·σ threshold are noise).
+    # Large jumps recovered (small ones below the k·sigma threshold are noise).
     large_planted = int(np.sum(np.abs(jump_sizes_arr) > 0.40))
     assert 0.50 * large_planted <= result.n_jumps <= 1.50 * large_planted, (
         f"detected {result.n_jumps} jumps; large planted {large_planted}"
     )
     assert p.jump_p_up > 0.55
-    # λ̂ must be in bounds (the bounded MLE would have raised otherwise).
+    # lambdâ must be in bounds (the bounded MLE would have raised otherwise).
     assert spot.LAMBDA_BOUNDS[0] <= p.jump_intensity <= spot.LAMBDA_BOUNDS[1]
     assert spot.ETA_BOUNDS[0] <= p.jump_eta_up <= spot.ETA_BOUNDS[1]
     assert spot.ETA_BOUNDS[0] <= p.jump_eta_down <= spot.ETA_BOUNDS[1]
     assert spot.KAPPA_BOUNDS[0] <= p.kappa <= spot.KAPPA_BOUNDS[1]
     # Slow factor RW params: drift ≈ 0, sigma small (since no trend planted).
     # Slow OU should be near-degenerate on this synthetic (no slow trend
-    # planted): σ_θ small. κ_θ is unconstrained, can be anything.
+    # planted): sigma_theta small. kappa_theta is unconstrained, can be anything.
     assert p.slow_factor.sigma < 0.05
     # n_obs is full input; residuals are post-warmup.
     assert result.n_obs == n_hours
@@ -760,7 +760,7 @@ def test_simulate_initial_residual_propagates() -> None:
 
 
 def test_simulate_long_run_residual_variance_matches_theory() -> None:
-    """For OU with constant σ and no jumps, Var(Z_∞) = σ² / (2κ)."""
+    """For OU with constant sigma and no jumps, Var(Z_∞) = sigma² / (2kappa)."""
     params = _trivial_params(
         intercept=0.0,
         kappa=0.10,
@@ -771,7 +771,7 @@ def test_simulate_long_run_residual_variance_matches_theory() -> None:
     paths = spot.simulate(params, start, n_hours=24 * 365, n_paths=200, seed=42)
     log_p = np.log(paths + params.price_shift)
     # Drop the first half as burn-in (initial_residual=0 takes a while to
-    # forget at κ=0.10 → half-life ~ ln 2 / 0.10 ≈ 7 h, so 6 months is plenty)
+    # forget at kappa=0.10 → half-life ~ ln 2 / 0.10 ≈ 7 h, so 6 months is plenty)
     burn = paths.shape[1] // 2
     var_observed = float(log_p[:, burn:].var())
     var_theoretical = 0.15**2 / (2 * 0.10)
@@ -789,8 +789,8 @@ def test_simulate_jumps_increase_dispersion() -> None:
 
 
 def test_simulate_slow_factor_mean_attracts_path() -> None:
-    """Slow-OU on θ_t with μ_θ ≠ initial_theta: paths drift toward μ_θ
-    over long horizons. Compare to the κ_θ=0 (no mean reversion) case."""
+    """Slow-OU on theta_t with mu_theta ≠ initial_theta: paths drift toward mu_theta
+    over long horizons. Compare to the kappa_theta=0 (no mean reversion) case."""
     start = pd.Timestamp("2025-01-01", tz="UTC")
     p_flat = _trivial_params(slow_kappa=0.0, slow_mean=0.0, slow_sigma=0.0,
                               jump_intensity=0.0)
@@ -802,8 +802,8 @@ def test_simulate_slow_factor_mean_attracts_path() -> None:
 
 
 def test_simulate_slow_factor_noise_inflates_long_horizon_dispersion() -> None:
-    """σ_θ > 0 inflates price dispersion over a year vs the σ_θ = 0 case
-    at the same κ_θ."""
+    """sigma_theta > 0 inflates price dispersion over a year vs the sigma_theta = 0 case
+    at the same kappa_theta."""
     start = pd.Timestamp("2025-01-01", tz="UTC")
     p_flat = _trivial_params(slow_kappa=0.001, slow_mean=0.0, slow_sigma=0.0,
                               jump_intensity=0.0)
