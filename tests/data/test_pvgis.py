@@ -34,9 +34,9 @@ def test_fixed_and_tracker_have_expected_geometry() -> None:
 
 def test_default_raddatabase_is_sarah3() -> None:
     assert pvgis.DEFAULT_RADDATABASE == pvgis.RADDATABASE_SARAH3
-    assert pvgis.ALLOWED_RADDATABASES == {
+    assert {
         pvgis.RADDATABASE_SARAH3, pvgis.RADDATABASE_ERA5,
-    }
+    } == pvgis.ALLOWED_RADDATABASES
 
 
 def test_raw_path_layout_includes_db(tmp_path, monkeypatch) -> None:

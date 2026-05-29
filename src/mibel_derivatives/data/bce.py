@@ -207,9 +207,13 @@ def smoke_download(
 
 
 __all__ = [
+    "CURATED_CURVES",
+    "CURATED_TENORS",
     "ECB_BASE_URL",
-    "CURATED_CURVES", "CURATED_TENORS",
-    "series_key", "raw_path",
-    "fetch_series", "parse_series",
-    "build_curated", "smoke_download",
+    "build_curated",
+    "fetch_series",
+    "parse_series",
+    "raw_path",
+    "series_key",
+    "smoke_download",
 ]

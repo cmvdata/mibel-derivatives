@@ -11,7 +11,6 @@ import json
 import time
 from pathlib import Path
 
-import pandas as pd
 import pytest
 
 from mibel_derivatives.data import ttf

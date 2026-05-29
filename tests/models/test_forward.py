@@ -13,7 +13,6 @@ import pytest
 
 from mibel_derivatives.models import forward
 
-
 # ---- H1. Public API + scaffold ---------------------------------------------
 
 

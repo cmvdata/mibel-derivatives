@@ -13,7 +13,6 @@ import pytest
 
 from mibel_derivatives.models import spot
 
-
 # ---- A. Public API contract ------------------------------------------------
 
 

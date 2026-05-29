@@ -218,9 +218,13 @@ def smoke_download(
 
 
 __all__ = [
+    "CONTRACT_EUA",
+    "CONTRACT_EUAA",
     "EEX_AUCTION_BASE_URL",
-    "CONTRACT_EUA", "CONTRACT_EUAA",
-    "annual_url", "raw_path",
-    "fetch_year", "parse_year",
-    "build_curated", "smoke_download",
+    "annual_url",
+    "build_curated",
+    "fetch_year",
+    "parse_year",
+    "raw_path",
+    "smoke_download",
 ]

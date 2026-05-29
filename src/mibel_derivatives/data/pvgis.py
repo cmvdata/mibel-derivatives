@@ -285,11 +285,20 @@ def smoke_download(
 
 
 __all__ = [
-    "PVGIS_BASE_URL",
-    "LAT_ANDALUCIA", "LON_ANDALUCIA",
-    "RADDATABASE_SARAH3", "RADDATABASE_ERA5", "ALLOWED_RADDATABASES",
+    "ALLOWED_RADDATABASES",
+    "CURATED_CONFIGS",
     "DEFAULT_RADDATABASE",
-    "PVConfig", "FIXED_35_SOUTH", "ONE_AXIS_NS", "CURATED_CONFIGS",
-    "raw_path", "fetch_year", "parse_year",
-    "build_curated", "smoke_download",
+    "FIXED_35_SOUTH",
+    "LAT_ANDALUCIA",
+    "LON_ANDALUCIA",
+    "ONE_AXIS_NS",
+    "PVGIS_BASE_URL",
+    "RADDATABASE_ERA5",
+    "RADDATABASE_SARAH3",
+    "PVConfig",
+    "build_curated",
+    "fetch_year",
+    "parse_year",
+    "raw_path",
+    "smoke_download",
 ]

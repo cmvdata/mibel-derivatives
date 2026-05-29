@@ -16,7 +16,6 @@ import pytest
 
 from mibel_derivatives.data import omip
 
-
 # 20-cell row layout matching the real OMIP HTML table. Two contracts.
 _FIXTURE_HTML = """
 <html><body>

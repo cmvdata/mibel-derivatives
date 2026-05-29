@@ -886,8 +886,8 @@ def _mle_jumps(
     j = jump_returns.to_numpy(dtype=float)
     j_up = j[j > 0]
     j_down = j[j < 0]
-    n_up = int(len(j_up))
-    n_down = int(len(j_down))
+    n_up = len(j_up)
+    n_down = len(j_down)
     sum_up = float(j_up.sum())
     sum_down_abs = float((-j_down).sum())
 

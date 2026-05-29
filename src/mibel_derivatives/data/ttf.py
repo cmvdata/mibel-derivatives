@@ -210,7 +210,11 @@ def smoke_download(
 
 
 __all__ = [
-    "YAHOO_CHART_BASE_URL", "TTF_SYMBOL",
-    "raw_path", "fetch_window", "parse_window",
-    "build_curated", "smoke_download",
+    "TTF_SYMBOL",
+    "YAHOO_CHART_BASE_URL",
+    "build_curated",
+    "fetch_window",
+    "parse_window",
+    "raw_path",
+    "smoke_download",
 ]

@@ -19,7 +19,6 @@ import pytest
 
 from mibel_derivatives.models import forward, spot
 
-
 OMIP_PATH = Path("data/curated/omip_forward_2019_2024.parquet")
 OMIE_PATH = Path("data/curated/omie_spot_es_2019_2024.parquet")
 PRODUCTION_FIT_PATH = Path("data/curated/forward_fit_production.pkl")

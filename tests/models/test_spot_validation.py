@@ -22,7 +22,6 @@ import pytest
 
 from mibel_derivatives.models import spot
 
-
 OMIE_PATH = Path("data/curated/omie_spot_es_2019_2024.parquet")
 N_PATHS_VALIDATION = 5000
 N_HOURS_VALIDATION = 24 * 365  # 8760
