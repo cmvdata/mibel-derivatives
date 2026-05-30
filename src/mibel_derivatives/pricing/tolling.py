@@ -1,21 +1,42 @@
-"""Tolling agreement pricer for a CCGT (Castejón I reference plant).
+"""CCGT tolling pricer -- compatibility shim.
 
-Specification (CONTEXT.md § Tolling agreement sobre Castejón I):
+The tolling-agreement implementation lives in
+:mod:`mibel_derivatives.products.tolling` (Pieza 4). This module was the
+original scaffolding placeholder (``raise NotImplementedError``); it now
+re-exports the real pricer so the historical ``pricing.tolling`` import
+path keeps working.
 
-Dispatch optimiser via dynamic programming over operating states
-(uncoupled, starting, technical minimum, optimal output, stopping) with
-temporal constraints (minimum up-time, minimum down-time). Valuation by
-Longstaff-Schwartz on the spark spread (S - HR · G - CO2_cost · ER),
-honouring operating constraints.
-
-Asset parameters live in the asset_parameters table — see CONTEXT.md
-for the Castejón I reference values and their public sources (Iberdrola
-Environmental Declaration 2024, NREL, Aurecon/AEMO benchmarks).
+New code should import from :mod:`mibel_derivatives.products.tolling`.
 """
 
 from __future__ import annotations
 
+from mibel_derivatives.products.tolling import (
+    DEFAULT_N_PATHS_DEV,
+    DEFAULT_N_PATHS_REPORT,
+    GJ_PER_MWH,
+    AssetParameters,
+    DispatchResult,
+    TollingAgreement,
+    TollingResult,
+    heat_rate_gj_per_mwh,
+    hourly_gross_margin,
+    optimise_dispatch,
+    price_tolling,
+    spark_spread_per_mwh,
+)
 
-def price_tolling(*args, **kwargs):  # type: ignore[no-untyped-def]
-    """Placeholder for the CCGT tolling pricer."""
-    raise NotImplementedError("price_tolling not implemented yet")
+__all__ = [
+    "DEFAULT_N_PATHS_DEV",
+    "DEFAULT_N_PATHS_REPORT",
+    "GJ_PER_MWH",
+    "AssetParameters",
+    "DispatchResult",
+    "TollingAgreement",
+    "TollingResult",
+    "heat_rate_gj_per_mwh",
+    "hourly_gross_margin",
+    "optimise_dispatch",
+    "price_tolling",
+    "spark_spread_per_mwh",
+]
