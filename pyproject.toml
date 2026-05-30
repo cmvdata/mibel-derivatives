@@ -64,4 +64,5 @@ markers = [
     "monte_carlo: tests that run Monte Carlo simulation (potentially slow)",
     "network: tests that hit the public internet (excluded from CI fast path)",
     "requires_full_fit: tests that need data/curated/forward_fit_production.pkl from the production-pod fit; skipped by default",
+    "requires_pod: tests that run the reported-valuation Monte Carlo size (N_PATHS=50000); run on the pod, off the CI fast lane",
 ]
