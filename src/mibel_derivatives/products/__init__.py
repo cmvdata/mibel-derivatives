@@ -9,6 +9,7 @@ the contract payoff and dispatch logic.
 Currently implemented:
 
 - :mod:`mibel_derivatives.products.tolling` -- CCGT tolling agreement (Pieza 4).
+- :mod:`mibel_derivatives.products.ppa` -- solar PPA (Pieza 5).
 """
 
 from __future__ import annotations
