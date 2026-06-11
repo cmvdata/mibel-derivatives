@@ -1,0 +1,103 @@
+\begin{thebibliography}{}
+
+\bibitem[Bessembinder and Lemmon, 2002]{bessembinder2002}
+Bessembinder, H. and Lemmon, M.~L. (2002).
+\newblock Equilibrium pricing and optimal hedging in electricity forward
+  markets.
+\newblock {\em The Journal of Finance}, 57(3):1347--1382.
+
+\bibitem[{Comisi{\'o}n Nacional de los Mercados y la Competencia (CNMC)},
+  2021]{cnmc_minorista2019}
+{Comisi{\'o}n Nacional de los Mercados y la Competencia (CNMC)} (2021).
+\newblock Informe de supervisi{\'o}n del mercado minorista de electricidad,
+  a{\~n}o 2019.
+\newblock Technical report, CNMC.
+\newblock Non-traditional retailers (not linked to
+  Endesa/Iberdrola/Naturgy/EDP) reached 30\% of total electricity sales (28\%
+  in 2018); the three largest groups held 81\% of the domestic segment.
+
+\bibitem[{Comisi{\'o}n Nacional de los Mercados y la Competencia (CNMC)},
+  2024a]{cnmc_flex2024}
+{Comisi{\'o}n Nacional de los Mercados y la Competencia (CNMC)} (2024a).
+\newblock Informe de supervisi{\'o}n de la flexibilidad y la contrataci{\'o}n
+  minorista (2023, avance 2024).
+\newblock Technical Report IS/DE/031/24, CNMC.
+\newblock SME and industrial consumers raised spot-indexed contracting by 4
+  points in two years, ``possibly given the difficulty of contracting
+  affordable fixed prices'' --- the regulator's own pass-through evidence.
+
+\bibitem[{Comisi{\'o}n Nacional de los Mercados y la Competencia (CNMC)},
+  2024b]{cnmc_cambios2023}
+{Comisi{\'o}n Nacional de los Mercados y la Competencia (CNMC)} (2024b).
+\newblock Informe de supervisi{\'o}n de los cambios de comercializador y de los
+  mercados minoristas de electricidad y gas, 2023.
+\newblock Technical Report 5619227, CNMC.
+\newblock 31-Dec-2023: 30.3M electricity supply points, 71.6\% free market; the
+  five largest groups supplied 85.6\% of free-market points, up from 81.4\%
+  three years earlier (concentration rose through the crisis).
+
+\bibitem[{Comisi{\'o}n Nacional de los Mercados y la Competencia (CNMC)},
+  2025]{cnmc_minorista2024}
+{Comisi{\'o}n Nacional de los Mercados y la Competencia (CNMC)} (2025).
+\newblock Informe de supervisi{\'o}n del mercado minorista de electricidad y
+  gas, 2024.
+\newblock Technical Report IS/DE/027/25, CNMC.
+\newblock 2024 electricity sales: Endesa 28\%, Iberdrola 23\%, Naturgy 8\%
+  (top-three integrated $\approx$59\%); non-traditional retailers recovering
+  only after price normalisation.
+
+\bibitem[{El Espa{\~n}ol / Invertia}, 2022]{invertia2022}
+{El Espa{\~n}ol / Invertia} (2022).
+\newblock Las el{\'e}ctricas independientes, en el alambre: un 117\% m{\'a}s de
+  insolvencias por el tope al gas, los precios y los impagos.
+\newblock Independent retailers' insolvencies +83\% (2021), +117\% (Q1-2022).
+
+\bibitem[{El Independiente}, 2022]{elindependiente2022}
+{El Independiente} (2022).
+\newblock Los altos precios arrastran a la quiebra a un centenar de
+  comercializadoras de luz y gas.
+\newblock ~100 electricity and gas retailers to bankruptcy by mid-2022;
+  integrated incumbents absorbed their books.
+
+\bibitem[Ferreira and Sebasti{\~a}o, 2018]{ferreira2018}
+Ferreira, M. and Sebasti{\~a}o, H. (2018).
+\newblock The {Iberian} electricity market: Analysis of the risk premium in an
+  illiquid market.
+\newblock {\em Journal of Energy Markets}, 11(2).
+\newblock Monthly MIBEL base-load futures, 2006-07..2017-03. Mean ex-post
+  premium $-5.77\%$ under the Weron--Zator (spot-minus-futures) sign, i.e.\
+  $\approx +5.8\%$ in our $F/\bar S-1$ convention; forward unbiasedness not
+  rejected. SSRN 3206589.
+
+\bibitem[{Gobierno de Espa{\~n}a}, 2022]{rdl10_2022}
+{Gobierno de Espa{\~n}a} (2022).
+\newblock Real decreto-ley 10/2022, de 13 de mayo, por el que se establece con
+  car{\'a}cter temporal un mecanismo de ajuste de costes de producci{\'o}n para
+  la reducci{\'o}n del precio de la electricidad (``excepci{\'o}n
+  ib{\'e}rica'').
+\newblock BOE-A-2022-7843. Gas-price cap for thermal generation in the MIBEL
+  pool, in force from June 2022.
+
+\bibitem[Longstaff and Wang, 2004]{longstaffwang2004}
+Longstaff, F.~A. and Wang, A.~W. (2004).
+\newblock Electricity forward prices: A high-frequency empirical analysis.
+\newblock {\em The Journal of Finance}, 59(4):1877--1900.
+
+\bibitem[Luc{\'i}a and Schwartz, 2002]{luciaschwartz2002}
+Luc{\'i}a, J.~J. and Schwartz, E.~S. (2002).
+\newblock Electricity prices and power derivatives: Evidence from the nordic
+  power exchange.
+\newblock {\em Review of Derivatives Research}, 5(1):5--50.
+
+\bibitem[Schwartz and Smith, 2000]{schwartzsmith2000}
+Schwartz, E. and Smith, J.~E. (2000).
+\newblock Short-term variations and long-term dynamics in commodity prices.
+\newblock {\em Management Science}, 46(7):893--911.
+
+\bibitem[Weron and Zator, 2014]{weronzator2014}
+Weron, R. and Zator, M. (2014).
+\newblock Revisiting the relationship between spot and futures prices in the
+  {Nord Pool} electricity market.
+\newblock {\em Energy Economics}, 44:178--190.
+
+\end{thebibliography}

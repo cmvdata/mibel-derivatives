@@ -1,0 +1,31 @@
+==========================================================================
+INFERENCE ON THE FORWARD RISK PREMIUM (points 1-2)
+==========================================================================
+
+[1] FRONT-MONTH premium: regime means, SE clustered by delivery month (n=1543, 71 clusters)
+    pre        +6.70%  95% CI [-2.01, +15.41]
+    crisis    +18.27%  95% CI [+5.47, +31.07]
+    recovery  +19.43%  95% CI [+1.03, +37.82]
+
+    Difference vs pre-crisis (clustered SE):
+    crisis    +11.57 pts  [-3.91, +27.05]  p=0.143
+    recovery  +12.73 pts  [-7.62, +33.08]  p=0.22
+
+    Block-bootstrap (resample delivery months, 3000 reps) 95% CI of mean:
+    pre       mean +6.73%  [-1.38, +16.21]
+    crisis    mean +18.35%  [+5.95, +32.37]
+    recovery  mean +19.26%  [+2.00, +39.14]
+
+[2] YEAR-AHEAD (YR) premium term structure (n=3906, deliveries [2020, 2021, 2022, 2023, 2024], mean lead 853 d)
+    Caveat: YR contracts overlap heavily on few delivery years -> means are
+    descriptive corroboration, not independent-sample inference.
+          count  mean  median
+regime                       
+pre        2867 -40.3   -49.9
+crisis      910  59.6    58.6
+recovery    129  61.3    63.4
+    pooled YR premium: mean -13.7%  median -34.9%
+    regime means, SE clustered by delivery year (few clusters; wide CIs):
+      pre       -40.31%  [-67.63, -13.00]
+      crisis    +59.63%  [+40.04, +79.22]
+      recovery  +61.34%  [+61.34, +61.34]
