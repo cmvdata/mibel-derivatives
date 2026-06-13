@@ -1,0 +1,26 @@
+==========================================================================
+DESCRIPTIVE — Iberian power forwards & spot, 2019-2024
+==========================================================================
+OMIP: 2019-01-01 -> 2024-12-31, 23,848 quotes (F>0); buckets {'YR': 14468, 'M': 9380}
+OMIE spot daily: 2019-01-01 -> 2024-12-31, 2,192 days
+
+--- OMIE daily-mean spot by regime (EUR/MWh) ---
+                                 count   mean   std  min    max
+reg                                                            
+1 pre-crisis (2019-01..2021-08)    974   47.8  21.0  1.4  130.3
+2 crisis (2021-09..2023-06)        668  151.5  68.1  2.6  547.5
+3 recovery (2023-07..2024-12)      550   70.7  37.6  0.4  146.5
+
+--- EX-POST front-month forward premium (model-free) ---
+premium% = 100*(F_quoted / realized_delivery_spot - 1); + = buyers pay above realized
+(mean front-contract lead = 16 days)
+                                 count  mean  median   std
+reg                                                       
+1 pre-crisis (2019-01..2021-08)    696   6.7     2.3  26.1
+2 crisis (2021-09..2023-06)        477  18.3    14.8  33.6
+3 recovery (2023-07..2024-12)      370  19.4     6.4  40.5
+pooled mean 13.3%  median 6.4%  n=1543
+
+Structural counterpart (production Schwartz-Smith fit, full sample):
+  lambda_chi = +0.444 /y (short-term risk premium); rmse_log_YR 0.043, rmse_log_M 0.18.
+  Regime-split structural fits: pod-run extension (reports/pod_runbook.md).
